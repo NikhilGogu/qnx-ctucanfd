@@ -101,6 +101,7 @@ enum {
     CTUCAN_FI_PASSIVE,      /* warning, error passive, back to error active */
     CTUCAN_FI_BUSOFF,       /* warning, passive, bus-off; recovers after the driver's ERCRST */
     CTUCAN_FI_TXDELAY,      /* TX completions held back: arg ms per frame, arg2 frames */
+    CTUCAN_FI_RXCORRUPT,    /* format word of RX frame arg2 altered: arg 1 = RWCNT one short, 2 = RWCNT 31 */
 };
 
 struct ctucan_fi *ctucan_fi_create(void);

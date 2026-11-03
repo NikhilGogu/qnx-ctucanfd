@@ -719,11 +719,38 @@ def t_fi_tx_order_fixed(t, bus):
     return f"{n} order breaks in 1000 frames across {x['tx_batches']} multi-buffer TX commands"
 
 
+def t_fi_rx_corrupt(t, bus):
+    """A corrupt RX format word: the frame is dropped, the FIFO flushed if needed, no bad payload delivered."""
+    t.driver("-q 256", variant=FI, force=True)
+    result = []
+    for mode, name in ((1, "RWCNT one short"), (2, "RWCNT 31")):
+        x0 = t.xstats()
+        fi(t, 5, mode, 5)
+        t.bg(f"{TEST} recv {RX0} 0", "/tmp/rxc.log")
+        time.sleep(0.5)
+        for q in range(20):
+            bus.send(0x2A7, pattern(q, 64))
+            time.sleep(0.003)
+        time.sleep(0.5)
+        t.ssh("slay -f canfd-test >/dev/null 2>&1; true")
+        got = parse_recv(t.out("cat /tmp/rxc.log"))
+        x = t.xstats()
+        seqs = [seq_of(g["data"]) for g in got]
+        bad = [g for g in got if g["data"] != pattern(seq_of(g["data"]), 64)]
+        rej, fl = x["rx_rejected"] - x0["rx_rejected"], x["rx_flushes"] - x0["rx_flushes"]
+        check(not bad, f"{name}: {len(bad)} corrupt payload(s) delivered")
+        check(seqs[:5] == [0, 1, 2, 3, 4] and seqs[-1] == 19 and 5 not in seqs, f"{name}: delivered {seqs}")
+        check(rej + fl > 0, f"{name}: nothing rejected or flushed")
+        result.append(f"{name}: {len(got)} of 20 delivered intact, seq 5 dropped, rejected {rej}, "
+                      f"flushes {fl} ({x['rx_flushed'] - x0['rx_flushed']} frames)")
+    return "; ".join(result)
+
+
 TESTS = [v for k, v in sorted(globals().items()) if k.startswith("t_")]
 ORDER = ["tx_lengths", "rx_lengths", "rtr", "ids", "write_path", "extended_mailbox", "readers", "writers",
          "rx_overflow", "bidir", "tx_order", "devctl_sizes", "timing", "spoofed_irq_pulse", "sigterm",
          "restart_under_load", "ecu_sim", "fi_warn", "fi_passive", "fi_busoff_auto", "fi_busoff_manual", "fi_txdelay", "fi_quiesce", "fi_race",
-         "fi_tx_order", "fi_tx_order_fixed"]
+         "fi_tx_order", "fi_tx_order_fixed", "fi_rx_corrupt"]
 
 
 def main():

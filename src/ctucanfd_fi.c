@@ -36,6 +36,8 @@ struct ctucan_fi {
     uint64_t hold_until[CTUCAN_TXT_BUFFERS];
     uint64_t last_hold;         /* release times never fall in the order buffers were set ready */
     uint32_t ready_seq[CTUCAN_TXT_BUFFERS], ready_count;
+    unsigned rx_mode, rx_skip;  /* RXCORRUPT: how, and frames to let through first */
+    bool     rx_armed;          /* the driver read RX_MEM_INFO: next RX_DATA read is a format word */
 };
 
 struct ctucan_fi *ctucan_fi_create(void)
@@ -60,7 +62,7 @@ static void set_err(struct ctucan_fi *fi, uint32_t fault, unsigned tec, unsigned
 
 int ctucan_fi_start(struct ctucan_fi *fi, unsigned scenario, unsigned arg, unsigned arg2, uint64_t now_ms)
 {
-    if (scenario > CTUCAN_FI_TXDELAY) {
+    if (scenario > CTUCAN_FI_RXCORRUPT) {
         return EINVAL;
     }
     fi->scenario = scenario;
@@ -79,6 +81,10 @@ int ctucan_fi_start(struct ctucan_fi *fi, unsigned scenario, unsigned arg, unsig
     case CTUCAN_FI_TXDELAY:
         fi->tx_delay = arg != 0 ? arg : 20;
         fi->tx_left = arg2 != 0 ? arg2 : 64;
+        break;
+    case CTUCAN_FI_RXCORRUPT:
+        fi->rx_mode = arg == 2 ? 2 : 1;
+        fi->rx_skip = arg2;
         break;
     default:
         /* start from a quiet error-active node, without raising interrupts */
@@ -173,6 +179,9 @@ bool ctucan_fi_tick(struct ctucan_fi *fi, uint64_t now_ms)
         case CTUCAN_FI_TXDELAY:
             done = fi->tx_left == 0 && fi->held == 0;
             break;
+        case CTUCAN_FI_RXCORRUPT:
+            done = fi->rx_mode == 0;
+            break;
         default:
             done = true;
             break;
@@ -189,12 +198,28 @@ unsigned ctucan_fi_state(const struct ctucan_fi *fi)
 uint32_t ctucan_rd(const ctucan_hw_t *hw, uint32_t off)
 {
     uint32_t v = ctucan_raw_rd(hw, off);
-    const struct ctucan_fi *fi = hw->fi;
+    struct ctucan_fi *fi = hw->fi;
 
     if (fi == NULL) {
         return v;
     }
     switch (off) {
+    case CTUCAN_RX_MEM_INFO:
+        fi->rx_armed = true;    /* ctucan_hw_rx() reads it right before a format word */
+        return v;
+    case CTUCAN_RX_DATA:
+        if (fi->rx_armed && fi->rx_mode != 0) {
+            if (fi->rx_skip > 0) {
+                fi->rx_skip--;
+            } else {
+                unsigned rwcnt = (v >> FFW_RWCNT_SHIFT) & FFW_RWCNT_MASK;
+                rwcnt = fi->rx_mode == 1 ? rwcnt - 1 : FFW_RWCNT_MASK;
+                v = (v & ~(FFW_RWCNT_MASK << FFW_RWCNT_SHIFT)) | (rwcnt << FFW_RWCNT_SHIFT);
+                fi->rx_mode = 0;
+            }
+        }
+        fi->rx_armed = false;
+        return v;
     case CTUCAN_INT_STAT:
         return v | fi->int_stat;
     case CTUCAN_STATUS:
@@ -251,9 +276,11 @@ void ctucan_wr(const ctucan_hw_t *hw, uint32_t off, uint32_t val)
                     continue;
                 }
                 if ((val & TXC_TXCR) && (fi->busoff || fi->tx_left > 0)) {
-                    uint64_t until = fi->now + fi->tx_delay;
+                    /* due on a 4 ms grid, so frames set ready close together
+                     * complete together, and never before an older buffer */
+                    uint64_t until = (fi->now + fi->tx_delay) / 4 * 4 + 4;
                     if (until < fi->last_hold) {
-                        until = fi->last_hold;  /* never before an older buffer */
+                        until = fi->last_hold;
                     }
                     fi->held |= bit;
                     fi->aborted &= ~bit;
