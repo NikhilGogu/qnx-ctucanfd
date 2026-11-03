@@ -44,6 +44,7 @@ scripts/host-vcan.sh vcan0          # loads vcan, creates vcan0 with mtu 72, bri
 With QNX SDP 8.0 installed:
 
 ```
+git clone https://github.com/NikhilGogu/qnx-ctucanfd.git && cd qnx-ctucanfd
 source ~/qnx800/qnxsdp-env.sh
 make                    # build/x86_64/: dev-can-ctucanfd canfd-test ecu-sim ctucan-supervisor ctucan-probe
 make FI=1               # build/x86_64-fi/: the same with the fault injector compiled in
