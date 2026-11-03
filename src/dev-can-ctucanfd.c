@@ -1303,6 +1303,19 @@ int main(int argc, char *argv[])
     fflush(stdout);
     can_slogf(SLOG2_INFO, DRV_NAME ": started on irq %d, unit %u", (int)d->irq, d->unit);
 
+    /* The driver keeps running after its parent sees it leave; like any daemon
+     * it lets go of the terminal or ssh session that started it, so that
+     * session can end. From here on everything goes to slog2. */
+    int nul = open("/dev/null", O_RDWR);
+    if (nul != -1) {
+        dup2(nul, STDIN_FILENO);
+        dup2(nul, STDOUT_FILENO);
+        dup2(nul, STDERR_FILENO);
+        if (nul > STDERR_FILENO) {
+            close(nul);
+        }
+    }
+
     can_resmgr_start();     /* returns after SIGTERM */
 
     can_slogf(SLOG2_INFO, DRV_NAME ": stopping, %u frame(s) in TXT buffers", tx_inflight(d));
