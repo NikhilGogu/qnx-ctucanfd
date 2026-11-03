@@ -91,9 +91,9 @@ class Target:
             self.put(os.path.join(build, f), f"/tmp/{f}")
         rc, out = self.ssh(f"/tmp/dev-can-ctucanfd {args} >/tmp/drv.log 2>&1 </dev/null; echo rc=$?; "
                            "cat /tmp/drv.log; for i in 1 2 3 4 5 6 7 8 9 10; do "
-                           "[ -e /dev/can1/tx1 ] && break; sleep 0.1; done; ls /dev/can1")
-        check("rc=0" in out and "CTU CAN FD" in out and "tx1" in out, f"driver start failed: {out.strip()}")
-        check("no continuation" not in out, f"driver has no continuation channel: {out.strip()}")
+                           "ls /dev/can1 2>/dev/null | grep -q tx && break; sleep 0.1; done; ls /dev/can1")
+        check("rc=0" in out and "CTU CAN FD" in out and re.search(r"^tx\d+$", out, re.M),
+              f"driver start failed: {out.strip()}")
         self.variant, self.args = variant, args
 
     def stop_all(self):
@@ -510,7 +510,7 @@ def t_restart_under_load(t, bus, kills=3):
              if b["t"] - a["t"] > 0.005]
     check(len(holes) == kills, f"{len(holes)} gaps over 5 ms for {kills} kills: {holes[:6]}")
     check(all(b > a for a, b in zip(seqs, seqs[1:])), "sequence went backwards")
-    ready = [float(x) for x in re.findall(r"ready \(\S+\) ([\d.]+) ms after spawn", sup)]
+    ready = [float(x) for x in re.findall(r"ready \([^)]*\) ([\d.]+) ms after spawn", sup)]
     check(sup.count("died") == kills and len(ready) == kills + 1, f"supervisor log:\n{sup}")
     reopen = [float(x) for x in re.findall(r"telemetry reopened \S+ after ([\d.]+) ms", ecu)]
     gaps_ms = ", ".join(f"{g * 1000:.1f}" for g, _, _ in holes)
@@ -518,6 +518,24 @@ def t_restart_under_load(t, bus, kills=3):
     return (f"{kills} kills under host load: telemetry gaps {gaps_ms} ms (1 ms period; periods lost {lost}); "
             f"driver ready {', '.join(f'{r:.1f}' for r in ready[1:])} ms after respawn; "
             f"ecu-sim reopened after {', '.join(f'{r:.1f}' for r in reopen)} ms; {len(frames)} frames")
+
+
+def t_supervisor_readiness(t, bus):
+    """Supervisor: a start that never becomes ready is killed and retried, a path served by another
+    process is not readiness, and spawn failures count against -n."""
+    deploy_tools(t)
+    out_a = t.out("/tmp/ctucan-supervisor -n 2 -r 300 -- /system/bin/sleep 30; echo exit=$?", timeout=60)
+    t.ssh("/tmp/dev-can-ctucanfd >/dev/null 2>&1 </dev/null")
+    wait_path(t, TX1)
+    out_b = t.out("/tmp/ctucan-supervisor -n 1 -r 500 -- /tmp/dev-can-ctucanfd; echo exit=$?", timeout=60)
+    t.stop_all()
+    out_c = t.out("/tmp/ctucan-supervisor -n 2 -- /tmp/no-such-driver; echo exit=$?", timeout=60)
+    check(out_a.count("not ready within 300 ms") == 3 and "restart limit 2 reached" in out_a and "exit=1" in out_a,
+          out_a)
+    check(out_b.count("path served by another process") == 2 and "restart limit 1 reached" in out_b, out_b)
+    check(out_c.count("spawn /tmp/no-such-driver") == 3 and "restart limit 2 reached" in out_c, out_c)
+    return ("never ready: killed after 300 ms x3, then 'restart limit 2 reached'; path served by another "
+            "driver: not taken as ready (x2); spawn failure x3 counted against -n 2")
 
 
 def t_ecu_sim(t, bus, seconds=30):
@@ -575,11 +593,57 @@ def fi(t, scenario, arg=0, arg2=0, budget=0, flags=0):
     check("No error" in out, f"fault injection request failed: {out.strip()}")
 
 
+def ticker(t, ms):
+    """The fault-injection script advances on CTUCAN_DEVCTL_FI_TICK, sent every millisecond."""
+    t.bg(f"{TEST} fitick {RX0} {ms}", "/tmp/tick.log")
+
+
+def send_burst(bus, cid, count, length=64, paced=0.0, groups=0, pause=0.05, payload=None):
+    for q in range(count):
+        bus.send(cid, payload(q) if payload else pattern(q, length))
+        if paced:
+            time.sleep(paced)
+        elif groups and q % groups == groups - 1:
+            time.sleep(pause)
+
+
+def monitor_line(t):
+    m = re.search(r"monitor: .*", t.out("cat /tmp/mon.log"))
+    check(m is not None, "no monitor output")
+    return m.group(0), int(re.search(r"(\d+) answered while", m.group(0)).group(1))
+
+
+def t_burst_batches(t, bus):
+    """300 frames in bursts of 90 (above the 64-frame batch): every frame arrives, devctls answered between batches."""
+    t.driver("-q 512", force=True)
+    x0 = t.xstats()
+    t.bg(f"{TEST} seqrecv {RX0} 300 20000", "/tmp/bb.log")
+    t.bg(f"{TEST} monitor {TX1} 2500", "/tmp/mon.log")
+    time.sleep(0.5)
+    send_burst(bus, 0x2A8, 300, groups=90)
+    time.sleep(2.5)
+    x, log = t.xstats(), t.out("cat /tmp/bb.log")
+    mon, between = monitor_line(t)
+    check("got 300 of 300, bad 0, missing 0, out_of_order 0" in log, log.strip())
+    check(x["deferred"] > x0["deferred"] and x["unmask_err"] == 0 and between > 0, f"{x} / {mon}")
+    return (f"300/300 in order; {x['hw_pulses'] - x0['hw_pulses']} interrupt pulses, "
+            f"{x['deferred'] - x0['deferred']} left work for the next, largest batch {x['rx_max_batch']} frames; {mon}")
+
+
+def t_fi_rejected_normal(t, bus):
+    """The normal build answers the fault-injection devctls like any unknown command."""
+    t.driver(force=True)
+    out = t.out(f"{TEST} fi {RX0} 1; {TEST} fitick {RX0} 5")
+    check(out.count("Inappropriate I/O control operation") == 2 and "No error" not in out, out.strip())
+    return "CTUCAN_DEVCTL_FI and CTUCAN_DEVCTL_FI_TICK -> ENOTTY"
+
+
 def t_fi_warn(t, bus):
     """Warning limit up and down while FAULT_STATE stays error active: counted from STATUS.EWL."""
     t.driver(variant=FI, force=True)
     fi(t, 1)
-    time.sleep(0.2)
+    ticker(t, 200)
+    time.sleep(0.5)
     x, s = t.xstats(), t.stats()
     check(x["ewl_up"] == 1 and x["ewl_down"] == 1, f"ewl up {x['ewl_up']} down {x['ewl_down']}")
     check(s["warn"] == 1 and s["passive"] == 0 and s["bus_off"] == 0, f"stats {s}")
@@ -591,7 +655,8 @@ def t_fi_passive(t, bus):
     """Error passive and back to error active; traffic continues."""
     t.driver(variant=FI, force=True)
     fi(t, 2)
-    time.sleep(0.2)
+    ticker(t, 200)
+    time.sleep(0.5)
     x, s = t.xstats(), t.stats()
     bus.drain()
     t.ssh(f"{TEST} send {TX1} 3D0 8")
@@ -609,24 +674,45 @@ def t_fi_busoff_auto(t, bus):
     """Bus-off with -a: TX held, recovery requested, TX resumes after FAULT_STATE reads error active."""
     t.driver("-a", variant=FI, force=True)
     bus.drain()
-    got = []
-    rx = threading.Thread(target=lambda: got.extend(bus.recv(300, 8, ids={0x2D0})))
-    rx.start()
+    cap = Capture(bus, 300, 8, ids={0x2D0})
+    ticker(t, 1500)
     t.bg(f"{TEST} seqsend {TX1} 2D0 16 300 1000", "/tmp/bo.log")
     time.sleep(0.15)
     fi(t, 3)
-    rx.join()
+    got = cap.wait()
     x, s = t.xstats(), t.stats()
-    log = t.out("slog2info 2>/dev/null | grep -E 'bus-off|warning|passive' | tail -4")
     check_seq_stream(got, 300, 16, "host side")
     check(s["bus_off"] == 1 and x["busoff_recovered"] == 1 and x["fault_state"] == 1, f"{s} {x}")
     return f"300/300 in order, bus_off 1, recovered 1, largest gap {max(gaps(got))} ms (1 ms pacing)"
+
+
+def t_fi_busoff_latch(t, bus):
+    """After bus-off, FAULT_STATE reading none and then passive does not release TX; only error active does."""
+    t.driver("-a", variant=FI, force=True)
+    bus.drain()
+    cap = Capture(bus, 200, 8, ids={0x2D2})
+    ticker(t, 1500)
+    t.bg(f"{TEST} seqsend {TX1} 2D2 16 200 2000", "/tmp/bl.log")
+    time.sleep(0.15)
+    # timed on the target: the scenario takes about 110 ms, an ssh round trip about 100 ms
+    out = t.out(f"{TEST} fi {RX0} 3 1 0 0 0 && sleep 0.06 && {TEST} xstats {RX0}")
+    mid = dict((k, int(v, 0)) for k, v in re.findall(r"(\w+) (0x[0-9a-f]+|\d+)", out))
+    check("busoff_hold" in mid, out.strip())
+    got = cap.wait()
+    x = t.xstats()
+    check_seq_stream(got, 200, 16, "host side")
+    g = max(gaps(got))
+    check(mid["busoff_hold"] == 1 and x["busoff_hold"] == 0 and x["busoff_recovered"] == 1, f"{mid} {x}")
+    check(g >= 95, f"largest gap {g} ms: TX was not held through the none and passive phases (100 ms)")
+    return (f"hold still set 60 ms in (FAULT_STATE {mid['fault_state']}); 200/200 in order; "
+            f"largest gap {g} ms against 2 ms pacing")
 
 
 def t_fi_busoff_manual(t, bus):
     """Bus-off without -a: TX stays held (queue fills, writers get EAGAIN) until CTUCAN_DEVCTL_RECOVER."""
     t.driver(variant=FI, force=True)
     fi(t, 3)
+    ticker(t, 4000)
     time.sleep(0.1)
     bus.drain()
     t.bg(f"{TEST} seqsend {TX1} 2D1 16 100 0", "/tmp/bm.log")
@@ -644,10 +730,30 @@ def t_fi_busoff_manual(t, bus):
     return f"0 frames while bus-off, writer EAGAIN x{retries}, 100/100 in order after recovery"
 
 
+def t_fi_busoff_stuck_abort(t, bus):
+    """Bus-off with frames in flight whose aborts take 100 ms: dropped at the 20 ms bound, TX resumes later."""
+    t.driver("-a", variant=FI, force=True)
+    fi(t, 4, 5000, 4)
+    ticker(t, 2000)
+    t.ssh(f"{TEST} seqsend {TX1} 2E3 16 4 0 >/dev/null")
+    x0 = t.xstats()
+    fi(t, 3, 0, 1)
+    time.sleep(0.5)
+    x1 = t.xstats()
+    bus.drain()
+    t.ssh(f"{TEST} send {TX1} 2E4 8")
+    fr = bus.recv(1, 3, ids={0x2E4})
+    check(x0["inflight"] == 4, f"in flight before bus-off: {x0['inflight']}")
+    check(x1["tx_abort_forced"] == 4 and x1["busoff_recovered"] == 1 and x1["inflight"] == 0, f"{x1}")
+    check(len(fr) == 1, "TX did not resume after the slow aborts finished")
+    return "4 frames stuck aborting -> dropped and counted at the bound (tx_abort_forced 4), recovery, TX resumes"
+
+
 def t_fi_txdelay(t, bus):
     """Late TX completions: four frames in flight, queue fills, FIFO order kept."""
     t.driver(variant=FI, force=True)
     fi(t, 4, 20, 100)
+    ticker(t, 3000)
     bus.drain()
     cap = Capture(bus, 100, 10, ids={0x2E0})
     t.ssh(f"{TEST} seqsend {TX1} 2E0 16 100 0 >/tmp/td.log 2>&1")
@@ -659,8 +765,30 @@ def t_fi_txdelay(t, bus):
     return f"100/100 in order, max in flight {x['tx_max_inflight']}, {log.strip()}"
 
 
+def t_fi_tx_budget(t, bus):
+    """RX budget of one frame per pulse while held TX completions are released three at a time: none lost."""
+    t.driver("-q 512", variant=FI, force=True)
+    fi(t, 4, 5, 300, 1)
+    ticker(t, 6000)
+    bus.drain()
+    t.bg(f"{TEST} seqrecv {RX0} 300 20000", "/tmp/tb.log")
+    time.sleep(0.5)
+    cap = Capture(bus, 300, 15, ids={0x2E5})
+    t.bg(f"{TEST} seqsend {TX1} 2E5 16 300 0", "/tmp/tbs.log")
+    send_burst(bus, 0x2A9, 300, paced=0.002)   # paced: one frame per pulse must keep up with the FIFO
+    got = cap.wait()
+    time.sleep(0.5)
+    x, log = t.xstats(), t.out("cat /tmp/tb.log")
+    check_seq_stream(got, 300, 16, "host side")
+    check("got 300 of 300, bad 0, missing 0, out_of_order 0" in log, log.strip())
+    check(x["tx_ok"] == 300 and x["tx_order_err"] == 0 and x["rx_max_batch"] == 1, f"{x}")
+    return (f"300 TX + 300 RX complete and in order with 1 RX frame per pulse; tx_ok {x['tx_ok']}, "
+            f"{x['tx_batches']} multi-buffer TX commands, {x['hw_pulses']} pulses")
+
+
 def t_fi_quiesce(t, bus):
-    """SET_TIMING with frames that do not finish: wait, abort, drop and count, restart, resume."""
+    """SET_TIMING with frames that do not finish: wait, abort, drop and count, restart, resume.
+    QEMU sent these frames when they were set ready; this tests the driver's bookkeeping only."""
     t.driver(variant=FI, force=True)
     fi(t, 4, 5000, 4)
     t.ssh(f"{TEST} seqsend {TX1} 2E1 16 4 0 >/dev/null")
@@ -676,27 +804,98 @@ def t_fi_quiesce(t, bus):
     return "4 frames in flight -> aborted and counted (tx_aborted +4), restart, TX resumes"
 
 
-def t_fi_race(t, bus):
-    """An interrupt pulse queued while a continuation is queued: each pulse keeps its own obligation."""
+def t_fi_reset_retry(t, bus):
+    """A restart whose reset times out leaves the core stopped; the next restart brings TX and RX back."""
+    t.driver(variant=FI, force=True)
+    fi(t, 6, 1)
+    out1 = t.out(f"{TEST} timing {RX0} 4 43 6 6")
+    x1 = t.xstats()
+    bus.drain()
+    t.ssh(f"{TEST} send {TX1} 2E6 8")
+    lost = bus.recv(1, 1, ids={0x2E6})
+    out2 = t.out(f"{TEST} timing {RX0} 4 43 6 6")
+    queued = bus.recv(1, 3, ids={0x2E6})
+    t.bg(f"{TEST} recv {RX0} 1", "/tmp/rr.log")
+    time.sleep(0.5)
+    bus.send(0x2AA, pattern(7, 8))
+    time.sleep(0.5)
+    got = parse_recv(t.out("cat /tmp/rr.log"))
+    x2 = t.xstats()
+    check("timed out" in out1 and x1["restart_fail"] == 1, f"first restart: {out1.strip()} {x1}")
+    check(not lost, "a frame left while the core was stopped")
+    check("No error" in out2 and len(queued) == 1 and x2["restarts"] == 1, f"second restart: {out2.strip()} {x2}")
+    check(len(got) == 1 and got[0]["data"] == pattern(7, 8), f"RX after the second restart: {got}")
+    return "reset timeout -> ETIMEDOUT, core stopped, nothing sent; second restart -> queued frame sent, RX works"
+
+
+def t_fi_state_clear(t, bus):
+    """Scenario OFF disarms a pending RX corruption; a core reset ends a bus-off overlay."""
+    t.driver(variant=FI, force=True)
+    x0 = t.xstats()
+    fi(t, 5, 2, 0)
+    fi(t, 0)
+    t.bg(f"{TEST} seqrecv {RX0} 10 5000", "/tmp/sc.log")
+    time.sleep(0.5)
+    send_burst(bus, 0x2AB, 10, paced=0.003)
+    time.sleep(0.5)
+    log, x1 = t.out("cat /tmp/sc.log"), t.xstats()
+    fi(t, 3)
+    ticker(t, 300)
+    time.sleep(0.4)
+    x2 = t.xstats()
+    t.ssh(f"{TEST} timing {RX0} 4 43 6 6")
+    bus.drain()
+    t.ssh(f"{TEST} send {TX1} 2E7 8")
+    fr = bus.recv(1, 3, ids={0x2E7})
+    x3 = t.xstats()
+    check("got 10 of 10, bad 0" in log and x1["rx_flushes"] == x0["rx_flushes"], f"after OFF: {log.strip()} {x1}")
+    check(x2["fault_state"] == 4 and x2["busoff_hold"] == 1, f"bus-off not reached: {x2}")
+    check(x3["fault_state"] != 4 and x3["busoff_hold"] == 0 and len(fr) == 1, f"after reset: {x3}, host {fr}")
+    return "OFF: 10/10 frames, no flush; bus-off then restart: overlay and hold gone, TX works"
+
+
+def t_fi_batches(t, bus):
+    """Forced small batches (4 frames per pulse): 90-frame burst complete, devctls answered between batches."""
     t.driver("-q 256", variant=FI, force=True)
-    fi(t, 0, budget=4, flags=1)
+    fi(t, 0, budget=4)
     t.bg(f"{TEST} seqrecv {RX0} 90 10000", "/tmp/race.log")
+    t.bg(f"{TEST} monitor {TX1} 1500", "/tmp/mon.log")
     time.sleep(0.5)
     x0 = t.xstats()
-    for q in range(90):
-        bus.send(0x2A4, pattern(q, 64))
+    send_burst(bus, 0x2A4, 90)
     time.sleep(1.5)
     x, log = t.xstats(), t.out("cat /tmp/race.log")
+    mon, between = monitor_line(t)
     check("got 90 of 90, bad 0, missing 0, out_of_order 0" in log, log.strip())
-    check(x["hw_while_cont"] > x0["hw_while_cont"] and x["unmask_err"] == 0, f"{x}")
-    return (f"90/90 in order; hw pulses {x['hw_pulses'] - x0['hw_pulses']}, continuations "
-            f"{x['cont_pulses'] - x0['cont_pulses']}, hw_while_cont {x['hw_while_cont'] - x0['hw_while_cont']}, "
-            f"unmask_err 0")
+    check(x["unmask_err"] == 0 and x["rx_max_batch"] <= 4 and between > 0, f"{x} / {mon}")
+    return (f"90/90 in order in {x['hw_pulses'] - x0['hw_pulses']} interrupt pulses of at most 4 frames, "
+            f"unmask_err 0; {mon}")
+
+
+def t_fi_reader_budget(t, bus):
+    """One RX mailbox return per pulse, readers on four mailboxes: RBNEI stays set until all are woken."""
+    t.driver("-r 4 -q 256", variant=FI, force=True)
+    fi(t, 0, flags=4)
+    for k in range(4):
+        t.bg(f"{TEST} recv /dev/can1/rx{k} 10", f"/tmp/rb{k}.log")
+    time.sleep(0.8)
+    x0 = t.xstats()
+    send_burst(bus, 0x2AC, 10, length=8, paced=0.005)
+    time.sleep(1.5)
+    counts = [len(parse_recv(t.out(f"cat /tmp/rb{k}.log"))) for k in range(4)]
+    left = t.out("pidin -p canfd-test -f a 2>/dev/null | grep -c canfd-test").strip()
+    x = t.xstats()
+    t.driver(force=True)
+    check(counts == [10] * 4 and left == "0", f"reader counts {counts}, {left} still blocked")
+    check(x["notify_deferred"] > x0["notify_deferred"], f"{x}")
+    return (f"4 mailboxes x 10 frames, every reader finished; {x['notify_deferred'] - x0['notify_deferred']} "
+            f"pulses held RBNEI for readers, {x['reports'] - x0['reports']} mailbox returns")
 
 
 def fi_order_run(t, bus, cid, flags):
     t.driver(variant=FI, force=True)
     fi(t, 4, 5, 1000, 0, flags)
+    ticker(t, 6000)
     bus.drain()
     cap = Capture(bus, 1000, 20, ids={cid})
     t.ssh(f"{TEST} seqsend {TX1} {cid:X} 8 1000 0 >/dev/null 2>&1")
@@ -719,38 +918,45 @@ def t_fi_tx_order_fixed(t, bus):
     return f"{n} order breaks in 1000 frames across {x['tx_batches']} multi-buffer TX commands"
 
 
+FFW_LOOKALIKE = 0x00009A8F      # a valid format word: 64-byte CAN FD frame, BRS, RWCNT 19
+
+
+def lookalike(q):
+    return q.to_bytes(4, "little") + FFW_LOOKALIKE.to_bytes(4, "little") * 15
+
+
 def t_fi_rx_corrupt(t, bus):
-    """A corrupt RX format word: the frame is dropped, the FIFO flushed if needed, no bad payload delivered."""
+    """A format word whose count disagrees with its DLC: FIFO flushed at once, nothing fabricated from
+    payloads that look like format words, adjacent frames either delivered intact or counted as flushed."""
     t.driver("-q 256", variant=FI, force=True)
     result = []
-    for mode, name in ((1, "RWCNT one short"), (2, "RWCNT 31")):
+    for mode, paced, name in ((1, 0.0, "RWCNT one short, frames back to back"), (2, 0.003, "RWCNT 31, paced")):
         x0 = t.xstats()
         fi(t, 5, mode, 5)
         t.bg(f"{TEST} recv {RX0} 0", "/tmp/rxc.log")
         time.sleep(0.5)
-        for q in range(20):
-            bus.send(0x2A7, pattern(q, 64))
-            time.sleep(0.003)
-        time.sleep(0.5)
+        send_burst(bus, 0x2A7, 20, paced=paced, payload=lookalike)
+        time.sleep(0.8)
         t.ssh("slay -f canfd-test >/dev/null 2>&1; true")
         got = parse_recv(t.out("cat /tmp/rxc.log"))
         x = t.xstats()
         seqs = [seq_of(g["data"]) for g in got]
-        bad = [g for g in got if g["data"] != pattern(seq_of(g["data"]), 64)]
-        rej, fl = x["rx_rejected"] - x0["rx_rejected"], x["rx_flushes"] - x0["rx_flushes"]
-        check(not bad, f"{name}: {len(bad)} corrupt payload(s) delivered")
-        check(seqs[:5] == [0, 1, 2, 3, 4] and seqs[-1] == 19 and 5 not in seqs, f"{name}: delivered {seqs}")
-        check(rej + fl > 0, f"{name}: nothing rejected or flushed")
-        result.append(f"{name}: {len(got)} of 20 delivered intact, seq 5 dropped, rejected {rej}, "
-                      f"flushes {fl} ({x['rx_flushed'] - x0['rx_flushed']} frames)")
+        bad = [g for g in got if g["id"] != 0x2A7 or g["data"] != lookalike(seq_of(g["data"]))]
+        fl, lost = x["rx_flushes"] - x0["rx_flushes"], x["rx_flushed"] - x0["rx_flushed"]
+        check(not bad, f"{name}: {len(bad)} fabricated or corrupt frame(s) delivered")
+        check(seqs == sorted(set(seqs)) and seqs[:5] == [0, 1, 2, 3, 4] and 5 not in seqs, f"{name}: {seqs}")
+        check(fl == 1 and len(got) + lost == 20, f"{name}: flushes {fl}, delivered {len(got)} + flushed {lost}")
+        result.append(f"{name}: {len(got)} delivered intact, {lost} flushed, 1 flush, none fabricated")
     return "; ".join(result)
 
 
 TESTS = [v for k, v in sorted(globals().items()) if k.startswith("t_")]
 ORDER = ["tx_lengths", "rx_lengths", "rtr", "ids", "write_path", "extended_mailbox", "readers", "writers",
-         "rx_overflow", "bidir", "tx_order", "devctl_sizes", "timing", "spoofed_irq_pulse", "sigterm",
-         "restart_under_load", "ecu_sim", "fi_warn", "fi_passive", "fi_busoff_auto", "fi_busoff_manual", "fi_txdelay", "fi_quiesce", "fi_race",
-         "fi_tx_order", "fi_tx_order_fixed", "fi_rx_corrupt"]
+         "rx_overflow", "bidir", "burst_batches", "tx_order", "devctl_sizes", "timing", "spoofed_irq_pulse",
+         "fi_rejected_normal", "sigterm", "restart_under_load", "supervisor_readiness", "ecu_sim", "fi_warn",
+         "fi_passive", "fi_busoff_auto", "fi_busoff_latch", "fi_busoff_manual", "fi_busoff_stuck_abort",
+         "fi_txdelay", "fi_tx_budget", "fi_quiesce", "fi_reset_retry", "fi_state_clear", "fi_batches",
+         "fi_reader_budget", "fi_tx_order", "fi_tx_order_fixed", "fi_rx_corrupt"]
 
 
 def main():
