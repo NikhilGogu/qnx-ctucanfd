@@ -14,6 +14,7 @@
  *   canfd-test timing DEV BRP TS1 TS2 SJW
  *   canfd-test fi DEV SCENARIO [ARG ARG2 BUDGET FLAGS]   fault injection builds only
  *   canfd-test pulse DEV CODE              send a pulse to the driver's channel
+ *   canfd-test badsize DEV                 devctls with short payloads (expect EINVAL)
  *
  * Sequenced frames: bytes 0..3 hold a little-endian sequence number, byte i
  * (i >= 4) holds (seq + i) & 0xff. Both seqsend and the host test scripts use
@@ -73,18 +74,27 @@ static void print_msg(const char *dev, const CAN_MSG *m)
 
 static int parse_id(const char *s, CAN_MSG *m)
 {
-    char *end;
-    unsigned long id = strtoul(s, &end, 16);
+    size_t n = strlen(s);
     int ext = 0;
+    char *end;
 
-    for (; *end != '\0'; end++) {
-        if (*end == 'x' || *end == 'X') {
+    /* trailing flags first, so "0x" is id 0 with the extended flag */
+    for (; n > 0 && strchr("xXrR", s[n - 1]) != NULL; n--) {
+        if (s[n - 1] == 'x' || s[n - 1] == 'X') {
             ext = 1;
-        } else if (*end == 'r' || *end == 'R') {
-            m->ext.is_remote_frame = 1;
         } else {
-            return EINVAL;
+            m->ext.is_remote_frame = 1;
         }
+    }
+    char digits[16];
+    if (n == 0 || n >= sizeof(digits) || strspn(s, "0123456789abcdefABCDEF") < n) {
+        return EINVAL;
+    }
+    memcpy(digits, s, n);
+    digits[n] = '\0';
+    unsigned long id = strtoul(digits, &end, 16);
+    if (*end != '\0') {
+        return EINVAL;
     }
     if (id > 0x7ff) {
         ext = 1;
@@ -312,10 +322,10 @@ static int do_xstats(int fd)
            "tx_order_err %u tx_quiesce_timeout %u tx_max_inflight %u\n",
            x.tx_started, x.tx_ok, x.tx_failed, x.tx_aborted, x.tx_lost, x.tx_rejected, x.tx_hw_busy,
            x.tx_order_err, x.tx_quiesce_timeout, x.tx_max_inflight);
-    printf("xstats: ewl_up %u ewl_down %u busoff_recovered %u restarts %u fault_state 0x%x ewl %u inflight %u "
-           "fi 0x%x\n",
-           x.ewl_up, x.ewl_down, x.busoff_recovered, x.restarts, (x.state >> 16) & 7u, (x.state >> 8) & 1u,
-           x.state & 0xffu, x.fi);
+    printf("xstats: tx_batches %u ewl_up %u ewl_down %u busoff_recovered %u restarts %u fault_state 0x%x ewl %u "
+           "inflight %u fi_scenario %u fi_step %u\n",
+           x.tx_batches, x.ewl_up, x.ewl_down, x.busoff_recovered, x.restarts, (x.state >> 16) & 7u,
+           (x.state >> 8) & 1u, x.state & 0xffu, x.state >> 28, (x.state >> 24) & 0xfu);
     return EOK;
 }
 
@@ -362,6 +372,19 @@ int main(int argc, char *argv[])
                               argc > 7 ? (uint32_t)strtoul(argv[7], NULL, 0) : 0 };
         rc = devctl(fd, CTUCAN_DEVCTL_FI, &r, sizeof(r), NULL);
         printf("CTUCAN_DEVCTL_FI: %s\n", strerror(rc));
+    } else if (strcmp(cmd, "badsize") == 0) {
+        /* each payload is shorter than its command needs */
+        CAN_MSG m;
+        uint32_t mid = 0x123u << 18;
+        CAN_DEVCTL_TIMING t = { 0, 4, 4, 43, 6 };
+        memset(&m, 0, sizeof(m));
+        m.len = 8;
+        int r1 = devctl(fd, CAN_DEVCTL_SET_MID, &mid, 2, NULL);
+        int r2 = devctl(fd, CAN_DEVCTL_WRITE_CANMSG_EXT, &m, 40, NULL);
+        int r3 = devctl(fd, CAN_DEVCTL_SET_TIMING, &t, 4, NULL);
+        printf("SET_MID/2: %s\nWRITE_CANMSG_EXT/40: %s\nSET_TIMING/4: %s\n", strerror(r1), strerror(r2),
+               strerror(r3));
+        rc = r1 == EINVAL && r2 == EINVAL && r3 == EINVAL ? EOK : EIO;
     } else if (strcmp(cmd, "pulse") == 0 && argc > 3) {
         /* an fd is a connection to the driver's channel, so it carries pulses */
         rc = MsgSendPulse(fd, -1, atoi(argv[3]), 0) == -1 ? errno : EOK;

@@ -116,7 +116,7 @@ struct drv {
     mbox_t tx[MAX_TX_DEVS];
 
 #ifdef CTUCAN_FI
-    bool    fi_race, fi_timer_ok, fi_timer_on;
+    bool    fi_race, fi_fixedprio, fi_timer_ok, fi_timer_on;
     timer_t fi_timer;
 #endif
 };
@@ -140,6 +140,7 @@ static uint64_t now_ms(void)
 }
 
 static void fi_tick(drv_t *d);
+static void tx_set_prio(drv_t *d);
 
 /* ---- transmit ---------------------------------------------------------- */
 
@@ -216,7 +217,11 @@ static void tx_kick(drv_t *d)
         }
     }
     if (ready != 0) {
+        /* one command for all of them: the core then picks by priority */
         ctucan_hw_txt_cmd(&d->hw, TXC_TXCR, ready);
+        if (ready & (ready - 1)) {
+            d->x.tx_batches++;
+        }
     }
 }
 
@@ -263,7 +268,7 @@ static unsigned tx_retire(drv_t *d, unsigned budget)
         }
         d->txb_tail++;
         if (d->ntxb > 1) {
-            ctucan_hw_tx_prio(&d->hw, d->ntxb, d->txb_tail % d->ntxb);
+            tx_set_prio(d);
         }
         if (st != TXT_ETY) {
             ctucan_hw_txt_cmd(&d->hw, TXC_TXCE, 1u << b);
@@ -271,6 +276,17 @@ static unsigned tx_retire(drv_t *d, unsigned budget)
         n++;
     }
     return n;
+}
+
+static void tx_set_prio(drv_t *d)
+{
+#ifdef CTUCAN_FI
+    if (d->fi_fixedprio) {
+        ctucan_wr(&d->hw, CTUCAN_TX_PRIORITY, 0x4321u);
+        return;
+    }
+#endif
+    ctucan_hw_tx_prio(&d->hw, d->ntxb, d->txb_tail % d->ntxb);
 }
 
 static void tx_abort_inflight(drv_t *d)
@@ -698,7 +714,8 @@ static int fi_request(drv_t *d, const ctucan_fi_req_t *r)
     }
     if (!d->fi_timer_ok) {
         struct sigevent ev;
-        SIGEV_PULSE_INIT(&ev, coid, getprio(0), PULSE_CODE_CONT, 0);
+        struct sched_param sp;
+        SIGEV_PULSE_INIT(&ev, coid, sched_getparam(0, &sp) == 0 ? sp.sched_priority : 10, PULSE_CODE_CONT, 0);
         if (timer_create(CLOCK_MONOTONIC, &ev, &d->fi_timer) == -1) {
             return errno;
         }
@@ -710,6 +727,8 @@ static int fi_request(drv_t *d, const ctucan_fi_req_t *r)
     }
     d->budget = r->budget != 0 ? r->budget : WORK_BUDGET;
     d->fi_race = (r->flags & CTUCAN_FI_F_RACE) != 0;
+    d->fi_fixedprio = (r->flags & CTUCAN_FI_F_FIXEDPRIO) != 0;
+    tx_set_prio(d);
     d->fs = ctucan_rd(&d->hw, CTUCAN_EWL_ERP_FAULT) & FS_MASK;
     d->ewl = (ctucan_rd(&d->hw, CTUCAN_STATUS) & STAT_EWL) != 0;
     can_slogf(SLOG2_INFO, DRV_NAME ": fault injection: scenario %u arg %u/%u budget %u%s", r->scenario, r->arg,
@@ -741,7 +760,7 @@ static int restart_controller(drv_t *d)
     ctucan_hw_start(&d->hw, &d->cfg, d->int_ena);
     d->suppressed = false;
     d->txb_head = d->txb_tail = 0;
-    ctucan_hw_tx_prio(&d->hw, d->ntxb, 0);
+    tx_set_prio(d);
     d->fs = ctucan_rd(&d->hw, CTUCAN_EWL_ERP_FAULT) & FS_MASK;
     d->ewl = (ctucan_rd(&d->hw, CTUCAN_STATUS) & STAT_EWL) != 0;
     d->tx_stopped = false;
@@ -905,7 +924,7 @@ static int cb_devctl(CANDEV *cdev, io_devctl_t *msg)
     case CTUCAN_DEVCTL_GET_XSTATS:
         d->x.state = d->fs | (d->ewl ? 1u << 8 : 0) | (tx_inflight(d) & 0xffu);
 #ifdef CTUCAN_FI
-        d->x.fi = ctucan_fi_state(d->hw.fi);
+        d->x.state |= (ctucan_fi_state(d->hw.fi) & 0xffu) << 24;
 #endif
         memcpy(out, &d->x, sizeof(d->x));
         rc = sizeof(d->x);
@@ -1266,7 +1285,7 @@ int main(int argc, char *argv[])
                 strerror(rc));
     }
     ctucan_hw_start(&d->hw, &d->cfg, d->int_ena);
-    ctucan_hw_tx_prio(&d->hw, d->ntxb, 0);
+    tx_set_prio(d);
     d->fs = ctucan_rd(&d->hw, CTUCAN_EWL_ERP_FAULT) & FS_MASK;
     d->ewl = (ctucan_rd(&d->hw, CTUCAN_STATUS) & STAT_EWL) != 0;
     d->hw_started = true;

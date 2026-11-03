@@ -45,8 +45,9 @@ typedef struct {
     uint32_t ewl_down;          /* back below the warning limit */
     uint32_t busoff_recovered;  /* bus-off left, confirmed by FAULT_STATE = error active */
     uint32_t restarts;          /* controller restarts (SET_TIMING) */
-    uint32_t state;             /* [18:16] FAULT_STATE, bit 8 STATUS.EWL, [7:0] frames in flight */
-    uint32_t fi;                /* fault injector (FI builds): scenario << 8 | step */
+    uint32_t tx_batches;        /* TX_COMMAND writes that set several buffers ready at once */
+    uint32_t state;             /* [31:28] FI scenario, [27:24] FI step, [18:16] FAULT_STATE,
+                                 * bit 8 STATUS.EWL, [7:0] frames in flight */
 } ctucan_xstats_t;
 
 typedef struct {
@@ -57,6 +58,7 @@ typedef struct {
 } ctucan_fi_req_t;
 
 #define CTUCAN_FI_F_RACE        1u  /* re-enable the interrupt output while a continuation is queued */
+#define CTUCAN_FI_F_FIXEDPRIO   2u  /* stage-one fixed TXT priorities (buffer n gets n + 1): negative control */
 
 #define CTUCAN_DCMD_CODE        200
 #define CTUCAN_DEVCTL_GET_XSTATS (__DIOF(_DCMD_MISC, CTUCAN_DCMD_CODE + 0, ctucan_xstats_t))
