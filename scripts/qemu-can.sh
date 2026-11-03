@@ -2,8 +2,9 @@
 # qemu-can.sh <target-dir> [host-can-if]
 # Relaunch a mkqnximage QEMU target with the exact arguments mkqnximage used,
 # plus a QEMU CAN bus, the CTU CAN FD PCI board (ctucan_pci) and a bridge to a
-# host SocketCAN interface. Runs daemonised; pidfile stays output/qemu.pid so
-# `mkqnximage --stop` and qtarget keep working.
+# host SocketCAN interface. Stops a QEMU of this target that is still running
+# first. Runs daemonised; pidfile stays output/qemu.pid so `mkqnximage --stop`
+# and qtarget keep working.
 set -euo pipefail
 D=$(cd "${1:?target dir, e.g. ~/targets/tc}" && pwd)
 IF=${2:-vcan0}
@@ -18,10 +19,24 @@ if ! ip link show "$IF" >/dev/null 2>&1; then
     echo "host CAN interface $IF missing (see scripts/host-vcan.sh)" >&2; exit 1
 fi
 
-P=$(cat "$D/output/qemu.pid" 2>/dev/null || true)
-if [ -n "$P" ] && kill -0 "$P" 2>/dev/null; then
-    echo "target already running (pid $P); stop it first" >&2; exit 1
-fi
+# A QEMU of this image that still runs (for example the one `mkqnximage
+# --run` started, which may not have written its pid file yet, so that
+# `mkqnximage --stop` misses it) holds the disk lock. mkqnximage starts QEMU in
+# the target directory, so stop every QEMU working there, until none has been
+# seen for a second.
+quiet=0; tries=0
+while [ $quiet -lt 5 ]; do
+    found=0
+    for p in $(pgrep -f '^qemu-system-' || true); do
+        if [ "$(readlink "/proc/$p/cwd" 2>/dev/null)" = "$D" ]; then
+            [ $tries = 0 ] && echo "stopping QEMU pid $p, which runs this target"
+            kill "$p" 2>/dev/null || true; found=1
+        fi
+    done
+    if [ $found = 1 ]; then quiet=0; tries=$((tries + 1)); else quiet=$((quiet + 1)); fi
+    [ $tries -lt 50 ] || { echo "QEMU in $D does not stop" >&2; exit 1; }
+    sleep 0.2
+done
 
 cd "$D"
 # Both CTU CAN FD cores sit on one bus. The bus id must not be a bare
