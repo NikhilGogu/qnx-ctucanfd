@@ -116,9 +116,19 @@ Planned: map `CAN_DEVCTL_SET_MFILTER` onto the core's hardware filters (FILTER_A
 
 ## 5. TX path
 
-libcan queues the frame and calls `transmit()`. The driver takes the next frame round robin across TX mailboxes, writes TXT buffer 1 (frame format, identifier, timestamp 0 = send now, data words) and issues TX_COMMAND.TXCR. One buffer in flight keeps the queue order. On TXBHCI it retires the buffer with TXCE, counts the result and starts the next frame. A plain `write()` has `mid == CAN_MSG_MID_UNKNOWN`, so the mailbox MID applies (default: standard id 0x100 + n).
+libcan queues a frame and calls `transmit()`. The driver takes frames round robin across TX mailboxes and keeps up to four in the core's TXT buffers (`-T 1..4`, default 4). A frame goes into the buffer at the head of a ring only if TX_STATUS shows that buffer writable (Empty, TX OK, TX failed, Aborted; datasheet 2.9). The driver copies what it needs (sequence, id, length, format) into its own slot for that buffer and returns libcan's queue element at once. All buffers filled in one pass are set ready with one TX_COMMAND.
 
-Planned: use all four TXT buffers with rotating priorities so frames go back to back on silicon while keeping FIFO order.
+Order: the core sends the ready buffer with the highest priority first. The oldest buffer in flight gets priority 7 and each later one one less; when the oldest finishes, the priorities rotate so the next oldest gets 7 (the scheme Linux's ctucanfd driver uses). QEMU 6.2 never sends a buffer with priority 0, so the priorities run 7 down to 4.
+
+Completion: on TXBHCI the driver retires buffers strictly from the oldest: TX OK counts as transmitted, TX failed as a frame error, Aborted as aborted, and Empty while a frame was in flight as lost (`tx_lost`). A later buffer that finishes while an older one is still pending counts as an ordering fault (`tx_order_err`). A plain `write()` has `mid == CAN_MSG_MID_UNKNOWN`; the mailbox then supplies the id and its format (11-bit, or 29-bit with `-x`), and the frame is a data frame whatever the reused queue element held before.
+
+Restart and shutdown: before a `CAN_DEVCTL_SET_TIMING` restart or a shutdown, TX admission stops and the driver waits up to 20 ms for the TXT buffers to finish, then aborts the rest and waits up to 20 ms again. Aborted frames are dropped and counted (`tx_aborted`); frames still in libcan's queues are kept and sent after a restart.
+
+Tests (`scripts/tests/ctutest.py`, results in section 10):
+
+- `tx_order`: one writer with no pacing, 2000 frames: all 2000 reached vcan0 in order. In QEMU a TXT buffer completes inside the TX_COMMAND write, so the driver rarely has several frames ready at once (max in flight 2 in that run).
+- `fi_tx_order`: the fault-injection build holds each completion 5 ms and releases at most three per millisecond, oldest first, so the driver refills several buffers in one command at changing ring positions: 1000/1000 frames in order across 249 multi-buffer TX commands, max 4 in flight, `tx_order_err 0`.
+- `fi_tx_order_fixed`: the same run with the stage-one fixed priorities (buffer n gets n + 1) as a negative control: 747 order breaks in 1000 frames. The ordering test does detect a wrong priority scheme.
 
 ## 6. CAN FD
 
