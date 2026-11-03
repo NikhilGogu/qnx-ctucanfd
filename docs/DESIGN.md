@@ -192,6 +192,12 @@ PASS: 64-byte CAN FD both ways, classic and 29-bit ids, 400/400 burst frames
 
 Planned tests: every length 0 to 64 both ways (DLC rounding), RTR, standard and extended ids, several mailboxes with filters, queue-full behaviour, restart under load, two QNX nodes on one QEMU bus (two boards), and aarch64le builds.
 
+## 10a. ecu-sim
+
+`tools/ecu-sim.c` is a small simulated battery-management ECU on QNX. A SCHED_FIFO thread (priority 30) sends one 64-byte CAN FD telemetry frame on id 0x18F every 10 ms with absolute deadlines (`clock_nanosleep(TIMER_ABSTIME)`): sequence number, time since start, pack voltage and current, state of charge and health, highest cell temperature, 16 cell voltages, its reopen count, and a CRC-8 (polynomial 0x1D) over the first 63 bytes. A period that is already over when the thread wakes is skipped and counted, so the sequence number counts periods. A second thread answers one diagnostic request: classic frame `7DF#02015B` (OBD-II service 01, PID 0x5B, battery pack remaining life, SAE J1979) gets `7E8#03415Bxx0000000000` with xx = state of charge * 255 / 100. Both threads reopen their device every millisecond after the driver goes away.
+
+Measured on tc (`ctutest.py ecu_sim`, 30 s, `candump -L vcan0,18F:7FF,7E8:7FF` on the host): 3032 telemetry frames, CRC and sequence clean; inter-frame time mean 10.000 ms, standard deviation 0.059 ms, min 8.457, 1st percentile 9.882, 99th percentile 10.114, max 11.694 ms; ecu-sim reported 0 missed periods. The diagnostic request sent with a raw socket was answered 1.2 ms later (host clock). These are timestamps of QEMU's host bridge on vcan0: they show how the QNX side schedules and how QEMU forwards frames, not CAN bus timing, since QEMU 6.2 models no bit timing.
+
 ## 11. Judge demo storyline (under 3 minutes)
 
 1. Problem (20 s): CAN FD software for QNX normally needs a CAN FD board on the desk. QEMU already emulates one, but QNX had no driver for it.

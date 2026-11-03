@@ -520,6 +520,47 @@ def t_restart_under_load(t, bus, kills=3):
             f"ecu-sim reopened after {', '.join(f'{r:.1f}' for r in reopen)} ms; {len(frames)} frames")
 
 
+def t_ecu_sim(t, bus, seconds=30):
+    """ecu-sim: 64-byte telemetry every 10 ms checked on the host (CRC, sequence, period); one diagnostic exchange."""
+    deploy_tools(t)
+    t.driver(force=True)
+    t.put(os.path.join(ROOT, "build", "x86_64", "ecu-sim"), "/tmp/ecu-sim")
+    t.bg("/tmp/ecu-sim", "/tmp/ecu.log")
+    cd = Candump(bus_if(bus), "18F:7FF,7E8:7FF")
+    time.sleep(seconds / 2)
+    t_req = time.time()
+    bus.send(0x7DF, bytes([2, 0x01, 0x5B, 0, 0, 0, 0, 0]))
+    time.sleep(seconds / 2)
+    frames = cd.stop()
+    t.ssh("slay -s TERM ecu-sim; sleep 0.3")
+    log = t.out("cat /tmp/ecu.log")
+    tel = [f for f in frames if f["id"] == 0x18F]
+    rsp = [f for f in frames if f["id"] == 0x7E8]
+    check(len(rsp) == 1 and rsp[0]["data"][:3] == bytes([3, 0x41, 0x5B]), f"diagnostic response {rsp}")
+    soc = rsp[0]["data"][3] * 100 / 255
+    bad_crc = sum(1 for f in tel if crc8(f["data"][:63]) != f["data"][63])
+    seqs = [seq_of(f["data"]) for f in tel]
+    check(bad_crc == 0 and seqs == list(range(seqs[0], seqs[0] + len(seqs))), f"{bad_crc} bad CRC, sequence holes")
+    d = sorted((b["t"] - a["t"]) * 1000 for a, b in zip(tel, tel[1:]))
+    n = len(d)
+    mean = sum(d) / n
+    sd = (sum((x - mean) ** 2 for x in d) / n) ** 0.5
+    p = lambda q: d[min(n - 1, int(q * n))]
+    return (f"{len(tel)} telemetry frames, CRC and sequence clean; host-side period (QEMU, not bus timing) mean "
+            f"{mean:.3f} ms, sd {sd:.3f}, min {d[0]:.3f}, p1 {p(0.01):.3f}, p99 {p(0.99):.3f}, max {d[-1]:.3f} ms; "
+            f"7DF 02 01 5B answered by 7E8 03 41 5B (SOC {soc:.0f} %) {(rsp[0]['t'] - t_req) * 1000:.1f} ms after "
+            f"cansend; {log.strip().splitlines()[-1]}")
+
+
+def crc8(data):
+    c = 0xFF
+    for b in data:
+        c ^= b
+        for _ in range(8):
+            c = ((c << 1) ^ 0x1D) & 0xFF if c & 0x80 else (c << 1) & 0xFF
+    return c
+
+
 def bus_if(bus):
     return bus.ifname
 
@@ -681,7 +722,7 @@ def t_fi_tx_order_fixed(t, bus):
 TESTS = [v for k, v in sorted(globals().items()) if k.startswith("t_")]
 ORDER = ["tx_lengths", "rx_lengths", "rtr", "ids", "write_path", "extended_mailbox", "readers", "writers",
          "rx_overflow", "bidir", "tx_order", "devctl_sizes", "timing", "spoofed_irq_pulse", "sigterm",
-         "restart_under_load", "fi_warn", "fi_passive", "fi_busoff_auto", "fi_busoff_manual", "fi_txdelay", "fi_quiesce", "fi_race",
+         "restart_under_load", "ecu_sim", "fi_warn", "fi_passive", "fi_busoff_auto", "fi_busoff_manual", "fi_txdelay", "fi_quiesce", "fi_race",
          "fi_tx_order", "fi_tx_order_fixed"]
 
 
