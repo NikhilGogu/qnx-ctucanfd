@@ -8,16 +8,14 @@
  * libcan's resource manager is single-threaded and runs every callback on
  * that thread, so the driver state needs no locks. can_resmgr_attach_intr()
  * associates the IRQ and a pulse code with libcan's pulse handler, which
- * calls event_handler(). Each interrupt pulse gets a bounded amount of work
- * and exactly one InterruptUnmask(); work left over is finished from a
- * continuation pulse while the core's interrupt output is disabled
+ * calls event_handler(). Each interrupt pulse does a bounded batch of work
+ * and ends with exactly one InterruptUnmask(). Work that is left keeps an
+ * interrupt status bit pending in the core, so the core interrupts again
+ * after the unmask and the next pulse takes the next batch
  * (docs/DESIGN.md, section 3).
  */
 #include <errno.h>
 #include <fcntl.h>
-#include <sched.h>
-#include <signal.h>
-#include <stdatomic.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -38,8 +36,7 @@
 #define MAX_RX_DEVS     16
 #define MAX_TX_DEVS     16
 #define PULSE_CODE_IRQ  (_PULSE_CODE_MINAVAIL + CTUCAN_PULSE_IRQ)
-#define PULSE_CODE_CONT (_PULSE_CODE_MINAVAIL + CTUCAN_PULSE_CONT)
-#define WORK_BUDGET     64u     /* frames moved plus TXT buffers retired per pulse */
+#define RX_BUDGET       64u     /* frames moved from the RX FIFO per pulse */
 #define PASS_LIMIT      8u      /* INT_STAT passes per pulse */
 #define REPORT_BUDGET   64u     /* RX mailbox returns to libcan per pulse */
 #define TX_QUIESCE_MS   20u     /* wait for frames in flight, then as long again after an abort */
@@ -80,7 +77,7 @@ struct drv {
     /* hardware */
     pci_devhdl_t    pci;
     pci_irq_t       irq;
-    int             iid, iid_cont;
+    int             iid;
     void           *map;
     ctucan_hw_t     hw;
     ctucan_hw_cfg_t cfg;
@@ -89,13 +86,12 @@ struct drv {
     bool            resmgr_up, hw_started;
 
     /* interrupt service */
-    bool        in_event, pulse_hw, more, suppressed, cont_queued;
-    unsigned    budget, reports_left, report_rr;
+    bool        in_event, suppressed, notify_left;
+    unsigned    budget, report_budget, reports_left, report_rr;
     uint32_t    rep_stuck;
     CANDEV     *last_rep;
     unsigned    last_msgcnt;
     size_t      last_waitcnt;
-    atomic_int  self_coid;
 
     /* TX */
     txslot_t txs[CTUCAN_TXT_BUFFERS];
@@ -107,6 +103,8 @@ struct drv {
     /* errors */
     uint32_t fs;                    /* last FAULT_STATE bits */
     bool     ewl;                   /* last STATUS.EWL, tracked apart from FAULT_STATE */
+    bool     busoff_hold;           /* set at bus-off, cleared only by FAULT_STATE = error active */
+    uint64_t abort_deadline;        /* aborted buffers must be final by then (ms) */
 
     int64_t          ts_delta;
     CAN_DEVCTL_STATS stats;
@@ -116,8 +114,7 @@ struct drv {
     mbox_t tx[MAX_TX_DEVS];
 
 #ifdef CTUCAN_FI
-    bool    fi_race, fi_fixedprio, fi_timer_ok, fi_timer_on;
-    timer_t fi_timer;
+    bool fi_fixedprio;
 #endif
 };
 
@@ -140,7 +137,6 @@ static uint64_t now_ms(void)
 }
 
 static void fi_tick(drv_t *d);
-static void tx_set_prio(drv_t *d);
 
 /* ---- transmit ---------------------------------------------------------- */
 
@@ -151,7 +147,18 @@ static unsigned tx_inflight(const drv_t *d)
 
 static bool tx_admit(const drv_t *d)
 {
-    return d->hw_started && !d->tx_stopped && !(d->fs & FS_BOF);
+    return d->hw_started && !d->tx_stopped && !d->busoff_hold;
+}
+
+static void tx_set_prio(drv_t *d)
+{
+#ifdef CTUCAN_FI
+    if (d->fi_fixedprio) {
+        ctucan_wr(&d->hw, CTUCAN_TX_PRIORITY, 0x4321u);
+        return;
+    }
+#endif
+    ctucan_hw_tx_prio(&d->hw, d->ntxb, d->txb_tail % d->ntxb);
 }
 
 /* Takes the next queued frame, round robin across TX mailboxes. */
@@ -225,14 +232,17 @@ static void tx_kick(drv_t *d)
     }
 }
 
-/* Retires finished TXT buffers in FIFO order, at most `budget`. */
-static unsigned tx_retire(drv_t *d, unsigned budget)
+/* Retires finished TXT buffers in FIFO order, judged from one TX_STATUS
+ * snapshot. At most ntxb (4) buffers, so this needs no budget, and after
+ * TXBHCI has been acknowledged no finished buffer is ever left behind. */
+static unsigned tx_retire(drv_t *d)
 {
+    uint32_t ts = ctucan_rd(&d->hw, CTUCAN_TX_STATUS);
     unsigned n = 0;
 
-    while (n < budget && tx_inflight(d) > 0) {
+    while (tx_inflight(d) > 0) {
         unsigned b = d->txb_tail % d->ntxb;
-        unsigned st = ctucan_hw_txt_state(&d->hw, b);
+        unsigned st = TXT_STATE(ts, b);
 
         switch (st) {
         case TXT_TOK:
@@ -259,7 +269,7 @@ static unsigned tx_retire(drv_t *d, unsigned budget)
              * priority, so one of them finishing first is an ordering fault. */
             for (unsigned k = d->txb_tail + 1; k != d->txb_head; k++) {
                 unsigned o = k % d->ntxb;
-                if (!d->txs[o].late && ctucan_hw_txt_state(&d->hw, o) == TXT_TOK) {
+                if (!d->txs[o].late && TXT_STATE(ts, o) == TXT_TOK) {
                     d->txs[o].late = true;
                     d->x.tx_order_err++;
                 }
@@ -278,30 +288,39 @@ static unsigned tx_retire(drv_t *d, unsigned budget)
     return n;
 }
 
-static void tx_set_prio(drv_t *d)
-{
-#ifdef CTUCAN_FI
-    if (d->fi_fixedprio) {
-        ctucan_wr(&d->hw, CTUCAN_TX_PRIORITY, 0x4321u);
-        return;
-    }
-#endif
-    ctucan_hw_tx_prio(&d->hw, d->ntxb, d->txb_tail % d->ntxb);
-}
-
 static void tx_abort_inflight(drv_t *d)
 {
+    uint32_t ts = ctucan_rd(&d->hw, CTUCAN_TX_STATUS);
     unsigned mask = 0;
 
     for (unsigned k = d->txb_tail; k != d->txb_head; k++) {
         unsigned b = k % d->ntxb;
-        unsigned st = ctucan_hw_txt_state(&d->hw, b);
+        unsigned st = TXT_STATE(ts, b);
         if (st == TXT_RDY || st == TXT_TRAN) {
             mask |= 1u << b;
         }
     }
     if (mask != 0) {
         ctucan_hw_txt_cmd(&d->hw, TXC_TXCA, mask);
+    }
+}
+
+/* Gives up on TXT buffers that are still not final: they are counted as
+ * aborted and the ring moves on. tx_kick() checks a buffer is writable before
+ * it uses it again, so a buffer that is still aborting is not overwritten. */
+static void tx_force_retire(drv_t *d)
+{
+    unsigned n = tx_inflight(d);
+
+    if (n == 0) {
+        return;
+    }
+    d->x.tx_abort_forced += n;
+    d->x.tx_aborted += n;
+    can_slogf(SLOG2_ERROR, DRV_NAME ": %u TXT buffer(s) did not finish or abort in time, dropped", n);
+    d->txb_tail = d->txb_head;
+    if (d->ntxb > 1) {
+        tx_set_prio(d);
     }
 }
 
@@ -315,7 +334,7 @@ static int tx_quiesce(drv_t *d, unsigned ms)
         uint64_t end = now_ms() + ms;
         for (;;) {
             fi_tick(d);
-            tx_retire(d, CTUCAN_TXT_BUFFERS);
+            tx_retire(d);
             if (tx_inflight(d) == 0) {
                 return EOK;
             }
@@ -330,10 +349,7 @@ static int tx_quiesce(drv_t *d, unsigned ms)
         }
     }
     d->x.tx_quiesce_timeout++;
-    d->x.tx_aborted += tx_inflight(d);
-    can_slogf(SLOG2_ERROR, DRV_NAME ": %u TXT buffer(s) did not finish or abort within %u ms", tx_inflight(d),
-              2 * ms);
-    d->txb_tail = d->txb_head;
+    tx_force_retire(d);
     return ETIMEDOUT;
 }
 
@@ -369,6 +385,17 @@ static void rx_deliver(drv_t *d, const CAN_MSG *m)
     }
 }
 
+static void rx_flush(drv_t *d)
+{
+    unsigned lost = ctucan_hw_rx_frames(&d->hw);
+
+    ctucan_hw_rx_flush(&d->hw);
+    d->x.rx_flushes++;
+    d->x.rx_flushed += lost;
+    d->stats.total_frame_errors++;
+    can_slogf(SLOG2_ERROR, DRV_NAME ": RX format word does not match its frame, FIFO flushed (%u frame(s))", lost);
+}
+
 static unsigned rx_drain(drv_t *d, unsigned budget)
 {
     unsigned n = 0;
@@ -376,23 +403,14 @@ static unsigned rx_drain(drv_t *d, unsigned budget)
     while (n < budget && ctucan_hw_rx_frames(&d->hw) > 0) {
         CAN_MSG m;
         ctucan_flags_t fl;
-        int rc = ctucan_hw_rx(&d->hw, &m, &fl);
 
-        n++;
-        if (rc == EIO) {
-            unsigned lost = ctucan_hw_rx_frames(&d->hw);
-            ctucan_hw_rx_flush(&d->hw);
-            d->x.rx_flushes++;
-            d->x.rx_flushed += lost;
-            d->stats.total_frame_errors++;
-            can_slogf(SLOG2_ERROR, DRV_NAME ": RX FIFO framing lost, flushed %u frame(s)", lost);
+        if (ctucan_hw_rx(&d->hw, &m, &fl) != EOK) {
+            /* nothing past the format word was consumed; where the next frame
+             * starts is unknown, so everything in the FIFO goes */
+            rx_flush(d);
             break;
         }
-        if (rc != EOK) {
-            d->x.rx_rejected++;
-            d->stats.total_frame_errors++;
-            continue;
-        }
+        n++;
         m.ext.timestamp = now_us(d);
         d->stats.received_frames++;
         rx_deliver(d, &m);
@@ -405,12 +423,33 @@ static unsigned rx_drain(drv_t *d, unsigned budget)
 static void enter_busoff(drv_t *d, uint32_t cnt)
 {
     d->stats.bus_off_state_count++;
+    d->busoff_hold = true;
     can_slogf(SLOG2_WARNING, DRV_NAME ": bus-off (TEC %u REC %u): TX held, %u frame(s) in TXT buffers aborted%s",
               CNT_TEC(cnt), CNT_REC(cnt), tx_inflight(d), d->autobus ? ", recovery requested" : "");
     tx_abort_inflight(d);
+    d->abort_deadline = now_ms() + TX_QUIESCE_MS;
     if (d->autobus) {
         ctucan_wr(&d->hw, CTUCAN_COMMAND, CMD_ERCRST);
     }
+}
+
+/* Aborted buffers must reach a final state within TX_QUIESCE_MS of the
+ * abort; checked on every service pass while bus-off and before TX resumes. */
+static void busoff_abort_check(drv_t *d, bool resuming)
+{
+    if (tx_inflight(d) == 0 || (!resuming && now_ms() < d->abort_deadline)) {
+        return;
+    }
+    if (resuming) {
+        uint64_t end = d->abort_deadline;
+        while (tx_retire(d), tx_inflight(d) > 0 && now_ms() < end) {
+            struct timespec ts = { 0, 200000 };
+            nanosleep(&ts, NULL);
+        }
+    } else {
+        tx_retire(d);
+    }
+    tx_force_retire(d);
 }
 
 static void error_event(drv_t *d, uint32_t st)
@@ -444,24 +483,27 @@ static void error_event(drv_t *d, uint32_t st)
     }
     uint32_t fs = ctucan_rd(&d->hw, CTUCAN_EWL_ERP_FAULT) & FS_MASK;
     if (fs != d->fs) {
-        uint32_t old = d->fs;
         uint32_t cnt = ctucan_rd(&d->hw, CTUCAN_REC_TEC);
 
         d->fs = fs;
         if (fs & FS_BOF) {
-            enter_busoff(d, cnt);
+            if (!d->busoff_hold) {
+                enter_busoff(d, cnt);
+            }
         } else if (fs & FS_ERP) {
             d->stats.error_passive_state_count++;
-            can_slogf(SLOG2_WARNING, DRV_NAME ": error passive (TEC %u REC %u)", CNT_TEC(cnt), CNT_REC(cnt));
+            can_slogf(SLOG2_WARNING, DRV_NAME ": error passive (TEC %u REC %u)%s", CNT_TEC(cnt), CNT_REC(cnt),
+                      d->busoff_hold ? ", TX still held after bus-off" : "");
         } else if (fs & FS_ERA) {
-            if (old & FS_BOF) {
+            if (d->busoff_hold) {
+                busoff_abort_check(d, true);
+                d->busoff_hold = false;
                 d->x.busoff_recovered++;
                 can_slogf(SLOG2_WARNING, DRV_NAME ": bus-off recovery confirmed, TX resumes");
-            } else if (old != 0) {
-                can_slogf(SLOG2_INFO, DRV_NAME ": error active");
             }
         }
-        tx_kick(d);     /* no-op unless admission allows */
+        /* any other value (none of the three bits) leaves a bus-off hold in place */
+        tx_kick(d);
     }
 }
 
@@ -483,19 +525,22 @@ static void unsuppress(drv_t *d)
     }
 }
 
-/* One bounded pass over the core. Returns true if work is left. */
-static bool service(drv_t *d)
+/* One bounded batch. TX completions and error events are handled in full
+ * (four TXT buffers at most); RX moves at most d->budget frames. RBNEI is not
+ * acknowledged here: finish_pulse() does that once the readers are woken. */
+static void service(drv_t *d)
 {
-    unsigned budget = d->budget;
+    unsigned budget = d->budget, moved = 0;
 
-    for (unsigned pass = 0; pass < PASS_LIMIT && budget > 0; pass++) {
+    for (unsigned pass = 0; pass < PASS_LIMIT; pass++) {
         uint32_t st = ctucan_rd(&d->hw, CTUCAN_INT_STAT) & d->int_ena;
+        bool rx = budget > 0 && ctucan_hw_rx_frames(&d->hw) > 0;
 
-        if (st == 0) {
-            if (pass == 0 && d->pulse_hw) {
+        if ((st & ~INT_RBNEI) == 0 && !rx) {
+            if (pass == 0 && st == 0) {
                 d->x.spurious++;    /* another device on a shared line, or already handled */
             }
-            return false;
+            break;
         }
         d->stats.total_interrupts++;
         if (st & INT_DOI) {
@@ -509,24 +554,25 @@ static bool service(drv_t *d)
             error_event(d, st);
         }
         if (st & INT_TXBHCI) {
-            /* ack before reading TX_STATUS: a buffer that changes later sets it again */
+            /* ack before the snapshot: a buffer that changes later sets it again */
             ctucan_wr(&d->hw, CTUCAN_INT_STAT, INT_TXBHCI);
             d->stats.tx_interrupts++;
-            unsigned n = tx_retire(d, budget);
-            budget -= n;
-            if (n > 0) {
-                tx_kick(d);
-            }
+            tx_retire(d);
+            tx_kick(d);     /* also when nothing retired: a busy buffer may have become writable */
         }
-        if ((st & INT_RBNEI) && budget > 0) {
+        if (d->busoff_hold) {
+            busoff_abort_check(d, false);
+        }
+        if (rx) {
+            unsigned n = rx_drain(d, budget);
             d->stats.rx_interrupts++;
-            budget -= rx_drain(d, budget);
-            /* set again at once if frames are left */
-            ctucan_wr(&d->hw, CTUCAN_INT_STAT, INT_RBNEI);
+            budget -= n;
+            moved += n;
         }
     }
-    /* checked after the acks: whatever is pending now is left for later */
-    return (ctucan_rd(&d->hw, CTUCAN_INT_STAT) & d->int_ena) != 0;
+    if (moved > d->x.rx_max_batch) {
+        d->x.rx_max_batch = moved;
+    }
 }
 
 /* libcan wakes one blocked reader per returned RX device, so a mailbox is
@@ -549,7 +595,7 @@ static CANDEV *next_report(drv_t *d)
             continue;
         }
         if (d->reports_left == 0) {
-            d->more = true;     /* the continuation wakes the rest */
+            d->notify_left = true;  /* the next interrupt pulse goes on with them */
             return NULL;
         }
         d->reports_left--;
@@ -563,53 +609,32 @@ static CANDEV *next_report(drv_t *d)
     return NULL;
 }
 
-static int send_cont(drv_t *d)
-{
-    int coid = atomic_load_explicit(&d->self_coid, memory_order_acquire);
-
-    if (coid == -1 || d->iid_cont == -1) {
-        return ENOTCONN;
-    }
-    if (MsgSendPulse(coid, -1, PULSE_CODE_CONT, 0) == -1) {
-        return errno;
-    }
-    d->x.cont_sent++;
-    return EOK;
-}
-
 static void finish_pulse(drv_t *d)
 {
-    if (d->pulse_hw) {
-        /* The core's interrupt output goes off before the line is unmasked and
-         * on again afterwards, so an event still pending gives a fresh edge.
-         * Nothing depends on how the interrupt controller treats a line that is
-         * already asserted when it is unmasked (section 3.2). */
-        suppress(d);
-        if (InterruptUnmask(0, d->iid) == -1 && d->x.unmask_err++ == 0) {
-            can_slogf(SLOG2_ERROR, DRV_NAME ": InterruptUnmask: %s", strerror(errno));
-        }
+    /* RBNEI stays set while reader notifications are left, so the core
+     * interrupts again and the next pulse continues them. Once they are done
+     * it is acknowledged; the core sets it again at once if frames are still
+     * in the FIFO (datasheet: RBNEI re-activates until the buffer is read). */
+    if (d->notify_left) {
+        d->x.notify_deferred++;
+    } else {
+        ctucan_wr(&d->hw, CTUCAN_INT_STAT, INT_RBNEI);
     }
-    if (d->more) {
-        d->x.deferred++;
-        if (!d->cont_queued) {
-            if (send_cont(d) != EOK) {
-                unsuppress(d);  /* no continuation channel: the core's interrupt resumes the work */
-                return;
-            }
-            d->cont_queued = true;
-        }
-#ifdef CTUCAN_FI
-        if (d->fi_race && d->pulse_hw) {
-            unsuppress(d);      /* lets an interrupt pulse queue up behind the continuation */
-        }
-#endif
-        return;     /* the output stays off until the continuation has finished */
-    }
-    if (d->cont_queued) {
-        return;     /* the queued continuation turns the output back on */
+
+    /* The core's interrupt output goes off before the line is unmasked and on
+     * again afterwards. Whatever is still pending then raises the line afresh
+     * and brings the next pulse; nothing depends on how the interrupt
+     * controller treats a line that is already asserted when it is unmasked
+     * (section 3.3). */
+    suppress(d);
+    if (InterruptUnmask(0, d->iid) == -1 && d->x.unmask_err++ == 0) {
+        can_slogf(SLOG2_ERROR, DRV_NAME ": InterruptUnmask: %s", strerror(errno));
     }
     if ((ctucan_rd(&d->hw, CTUCAN_INT_STAT) & d->int_ena) != 0) {
         d->x.rearm_pending++;
+        if (d->notify_left || ctucan_hw_rx_frames(&d->hw) > 0) {
+            d->x.deferred++;
+        }
     }
     unsuppress(d);
 }
@@ -619,24 +644,18 @@ static CANDEV *cb_event(void *const hdl, const int code)
     drv_t *d = hdl;
 
     if (!d->in_event) {
-        if (code == PULSE_CODE_IRQ) {
-            d->pulse_hw = true;
-            d->x.hw_pulses++;
-            if (d->cont_queued) {
-                d->x.hw_while_cont++;
-            }
-        } else if (code == PULSE_CODE_CONT) {
-            d->pulse_hw = false;
-            d->x.cont_pulses++;
-            d->cont_queued = false;
-        } else {
+        if (code != PULSE_CODE_IRQ) {
             can_slogf(SLOG2_WARNING, DRV_NAME ": unexpected pulse code %d", code);
             return NULL;
         }
+        d->x.hw_pulses++;
         d->in_event = true;
+        d->notify_left = false;
         fi_tick(d);
-        d->more = d->hw_started && service(d);
-        d->reports_left = REPORT_BUDGET;
+        if (d->hw_started) {
+            service(d);
+        }
+        d->reports_left = d->report_budget;
         d->rep_stuck = 0;
         d->last_rep = NULL;
     }
@@ -649,91 +668,55 @@ static CANDEV *cb_event(void *const hdl, const int code)
     return NULL;
 }
 
-/* A connection to our own channel for continuation pulses. A process cannot
- * open the paths it registered itself, so the channel is found from the
- * process's own connections: every connection whose server is this process
- * must lead to the same channel, libcan's. If that is not so, there is no
- * continuation and deferred work resumes through the core's interrupt. */
-static int self_connect(drv_t *d)
-{
-    struct _server_info si;
-    int chid = -1;
-
-    for (int coid = 0; (coid = ConnectServerInfo(0, coid, &si)) != -1; coid++) {
-        if (si.pid != getpid()) {
-            continue;
-        }
-        if (chid != -1 && si.chid != chid) {
-            can_slogf(SLOG2_ERROR, DRV_NAME ": channels %d and %d in this process, no continuation", chid,
-                      si.chid);
-            return ESRCH;
-        }
-        chid = si.chid;
-    }
-    if (chid == -1) {
-        return ESRCH;
-    }
-    int coid = ConnectAttach(0, 0, chid, _NTO_SIDE_CHANNEL, 0);
-    if (coid == -1) {
-        return errno;
-    }
-    atomic_store_explicit(&d->self_coid, coid, memory_order_release);
-    return EOK;
-}
-
 /* ---- fault injection (FI builds) --------------------------------------- */
 
 #ifdef CTUCAN_FI
-static void fi_timer_set(drv_t *d, bool on)
-{
-    struct itimerspec it = { { 0, 0 }, { 0, 0 } };
-
-    if (!d->fi_timer_ok || on == d->fi_timer_on) {
-        return;
-    }
-    if (on) {
-        it.it_value.tv_nsec = it.it_interval.tv_nsec = 1000000;
-    }
-    timer_settime(d->fi_timer, 0, &it, NULL);
-    d->fi_timer_on = on;
-}
-
 static void fi_tick(drv_t *d)
 {
     if (d->hw.fi != NULL) {
-        fi_timer_set(d, ctucan_fi_tick(d->hw.fi, now_ms()));
+        ctucan_fi_tick(d->hw.fi, now_ms());
+    }
+}
+
+/* CTUCAN_DEVCTL_FI_TICK, sent by a test client every millisecond while a
+ * scenario runs: advances the script and handles the injected error and TX
+ * events. RX is left to interrupt pulses, which also wake the readers. */
+static void fi_devctl_tick(drv_t *d)
+{
+    fi_tick(d);
+    if (!d->hw_started) {
+        return;
+    }
+    uint32_t st = ctucan_rd(&d->hw, CTUCAN_INT_STAT) & d->int_ena & (INT_TXBHCI | INT_EWLI | INT_FCSI | INT_BEI);
+    if (st & (INT_EWLI | INT_FCSI | INT_BEI)) {
+        ctucan_wr(&d->hw, CTUCAN_INT_STAT, st & (INT_EWLI | INT_FCSI | INT_BEI));
+        error_event(d, st);
+    }
+    if (st & INT_TXBHCI) {
+        ctucan_wr(&d->hw, CTUCAN_INT_STAT, INT_TXBHCI);
+        tx_retire(d);
+        tx_kick(d);
+    }
+    if (d->busoff_hold) {
+        busoff_abort_check(d, false);
     }
 }
 
 static int fi_request(drv_t *d, const ctucan_fi_req_t *r)
 {
-    int coid = atomic_load_explicit(&d->self_coid, memory_order_acquire);
-
-    if (coid == -1) {
-        return EAGAIN;
-    }
-    if (!d->fi_timer_ok) {
-        struct sigevent ev;
-        struct sched_param sp;
-        SIGEV_PULSE_INIT(&ev, coid, sched_getparam(0, &sp) == 0 ? sp.sched_priority : 10, PULSE_CODE_CONT, 0);
-        if (timer_create(CLOCK_MONOTONIC, &ev, &d->fi_timer) == -1) {
-            return errno;
-        }
-        d->fi_timer_ok = true;
-    }
     int rc = ctucan_fi_start(d->hw.fi, r->scenario, r->arg, r->arg2, now_ms());
+
     if (rc != EOK) {
         return rc;
     }
-    d->budget = r->budget != 0 ? r->budget : WORK_BUDGET;
-    d->fi_race = (r->flags & CTUCAN_FI_F_RACE) != 0;
+    d->budget = r->budget != 0 ? r->budget : RX_BUDGET;
+    d->report_budget = (r->flags & CTUCAN_FI_F_REPORT1) ? 1 : REPORT_BUDGET;
     d->fi_fixedprio = (r->flags & CTUCAN_FI_F_FIXEDPRIO) != 0;
     tx_set_prio(d);
     d->fs = ctucan_rd(&d->hw, CTUCAN_EWL_ERP_FAULT) & FS_MASK;
     d->ewl = (ctucan_rd(&d->hw, CTUCAN_STATUS) & STAT_EWL) != 0;
-    can_slogf(SLOG2_INFO, DRV_NAME ": fault injection: scenario %u arg %u/%u budget %u%s", r->scenario, r->arg,
-              r->arg2, d->budget, d->fi_race ? " race" : "");
-    fi_timer_set(d, true);
+    can_slogf(SLOG2_INFO, DRV_NAME ": fault injection: scenario %u arg %u/%u budget %u flags 0x%x", r->scenario,
+              r->arg, r->arg2, d->budget, r->flags);
     return EOK;
 }
 #else
@@ -747,13 +730,15 @@ static void fi_tick(drv_t *d)
 
 static int restart_controller(drv_t *d)
 {
-    int rc = tx_quiesce(d, TX_QUIESCE_MS);
+    int rc = d->hw_started ? tx_quiesce(d, TX_QUIESCE_MS) : EOK;
 
-    rx_drain(d, 512);       /* frames already received reach the mailboxes */
+    /* the reset empties the RX FIFO: count what it held */
+    d->x.rx_flushed += ctucan_hw_rx_frames(&d->hw);
     ctucan_hw_stop(&d->hw);
+    d->hw_started = false;
     int rrc = ctucan_hw_reset(&d->hw);
     if (rrc != EOK) {
-        d->hw_started = false;
+        d->x.restart_fail++;
         can_slogf(SLOG2_ERROR, DRV_NAME ": controller reset timed out, core left stopped");
         return rrc;
     }
@@ -763,7 +748,9 @@ static int restart_controller(drv_t *d)
     tx_set_prio(d);
     d->fs = ctucan_rd(&d->hw, CTUCAN_EWL_ERP_FAULT) & FS_MASK;
     d->ewl = (ctucan_rd(&d->hw, CTUCAN_STATUS) & STAT_EWL) != 0;
+    d->busoff_hold = false;     /* the reset clears the error counters */
     d->tx_stopped = false;
+    d->hw_started = true;       /* only now: the core is out of reset and set up again */
     d->x.restarts++;
     tx_kick(d);
     return rc == ETIMEDOUT ? EOK : rc;  /* the restart happened; the timeout is counted */
@@ -817,8 +804,8 @@ static void dump_regs(const drv_t *d)
     for (size_t i = 0; i < sizeof(regs) / sizeof(regs[0]); i++) {
         can_slogf(SLOG2_INFO, DRV_NAME ": %-12s 0x%08x", regs[i].name, ctucan_rd(&d->hw, regs[i].off));
     }
-    can_slogf(SLOG2_INFO, DRV_NAME ": pulses hw %u cont %u, deferred %u, unmask_err %u, in flight %u",
-              d->x.hw_pulses, d->x.cont_pulses, d->x.deferred, d->x.unmask_err, tx_inflight(d));
+    can_slogf(SLOG2_INFO, DRV_NAME ": pulses %u, deferred %u, unmask_err %u, in flight %u, bus-off hold %d",
+              d->x.hw_pulses, d->x.deferred, d->x.unmask_err, tx_inflight(d), d->busoff_hold);
 }
 
 static int cb_devctl(CANDEV *cdev, io_devctl_t *msg)
@@ -922,7 +909,7 @@ static int cb_devctl(CANDEV *cdev, io_devctl_t *msg)
         rc = is_rx ? -ENOTSUP : -EINVAL;
         break;
     case CTUCAN_DEVCTL_GET_XSTATS:
-        d->x.state = d->fs | (d->ewl ? 1u << 8 : 0) | (tx_inflight(d) & 0xffu);
+        d->x.state = d->fs | (d->busoff_hold ? 1u << 9 : 0) | (d->ewl ? 1u << 8 : 0) | (tx_inflight(d) & 0xffu);
 #ifdef CTUCAN_FI
         d->x.state |= (ctucan_fi_state(d->hw.fi) & 0xffu) << 24;
 #endif
@@ -942,6 +929,10 @@ static int cb_devctl(CANDEV *cdev, io_devctl_t *msg)
         NEED(sizeof(ctucan_fi_req_t));
         rc = -fi_request(d, (const ctucan_fi_req_t *)in);
         break;
+    case CTUCAN_DEVCTL_FI_TICK:
+        fi_devctl_tick(d);
+        rc = EOK;
+        break;
 #endif
     default:
         rc = -ENOTSUP;
@@ -960,8 +951,6 @@ static can_drvr_funcs_t g_funcs = {
     .devctl = cb_devctl,
     .event_handler = cb_event,
 };
-
-/* ---- setup ------------------------------------------------------------- */
 
 static void usage(void)
 {
@@ -1173,27 +1162,6 @@ static int attach_irq(drv_t *d)
         fprintf(stderr, DRV_NAME ": can_resmgr_attach_intr(%d): %s\n", (int)d->irq, strerror(errno));
         return EIO;
     }
-    /* libcan hands a pulse code to event_handler() only if the code was
-     * registered with can_resmgr_attach_intr(). The continuation code is
-     * registered that way, with the line masked through the first attachment
-     * so the second one never fires, and then its interrupt is detached: the
-     * code stays registered and no interrupt is behind it. */
-    if (InterruptMask(0, d->iid) == -1) {
-        fprintf(stderr, DRV_NAME ": InterruptMask: %s\n", strerror(errno));
-        return EIO;
-    }
-    int iid = can_resmgr_attach_intr(d, d->irq, PULSE_CODE_CONT);
-    if (iid == -1) {
-        fprintf(stderr, DRV_NAME ": continuation code: %s; deferred work resumes by interrupt\n", strerror(errno));
-    } else if (InterruptDetach(iid) == -1) {
-        fprintf(stderr, DRV_NAME ": InterruptDetach: %s\n", strerror(errno));
-    } else {
-        d->iid_cont = iid;
-    }
-    if (InterruptUnmask(0, d->iid) == -1) {
-        fprintf(stderr, DRV_NAME ": InterruptUnmask: %s\n", strerror(errno));
-        return EIO;
-    }
     return EOK;
 }
 
@@ -1202,7 +1170,9 @@ static void teardown(drv_t *d)
 {
     if (d->hw_started) {
         tx_quiesce(d, TX_QUIESCE_MS);
-        ctucan_hw_stop(&d->hw);
+    }
+    if (d->map != NULL) {
+        ctucan_hw_stop(&d->hw);     /* also after a failed restart: leave the core off the bus */
         d->hw_started = false;
     }
     if (d->iid != -1) {
@@ -1222,10 +1192,6 @@ static void teardown(drv_t *d)
     if (d->resmgr_up) {
         can_resmgr_fini();
     }
-    int coid = atomic_exchange(&d->self_coid, -1);
-    if (coid != -1) {
-        ConnectDetach(coid);
-    }
     if (d->map != NULL) {
         munmap_device_memory(d->map, CTUCAN_CORE_SPAN);
     }
@@ -1239,8 +1205,7 @@ int main(int argc, char *argv[])
     drv_t *d = &g_drv;
     int rc;
 
-    d->iid = d->iid_cont = -1;
-    atomic_init(&d->self_coid, -1);
+    d->iid = -1;
     if ((rc = parse_args(d, argc, argv)) != EOK) {
         return rc;
     }
@@ -1269,7 +1234,8 @@ int main(int argc, char *argv[])
         goto fail;
     }
     d->int_ena = INT_RBNEI | INT_DOI | INT_TXBHCI | INT_EWLI | INT_FCSI | INT_BEI;
-    d->budget = WORK_BUDGET;
+    d->budget = RX_BUDGET;
+    d->report_budget = REPORT_BUDGET;
 
     if (can_resmgr_init(&g_funcs, d->verbosity) != EOK) {
         fprintf(stderr, DRV_NAME ": can_resmgr_init failed\n");
@@ -1279,10 +1245,6 @@ int main(int argc, char *argv[])
     d->resmgr_up = true;
     if ((rc = devices_init(d)) != EOK || (rc = attach_irq(d)) != EOK) {
         goto fail;
-    }
-    if (d->iid_cont != -1 && (rc = self_connect(d)) != EOK) {
-        fprintf(stderr, DRV_NAME ": no continuation channel (%s); deferred work resumes by interrupt\n",
-                strerror(rc));
     }
     ctucan_hw_start(&d->hw, &d->cfg, d->int_ena);
     tx_set_prio(d);
@@ -1298,8 +1260,7 @@ int main(int argc, char *argv[])
         printf(", data %u bit/s (brp %u tq %u)%s", d->dbitrate, d->cfg.data.brp,
                1 + d->cfg.data.prop + d->cfg.data.ph1 + d->cfg.data.ph2, d->brs ? " BRS" : "");
     }
-    printf(", %u TXT buffer(s)%s%s\n", d->ntxb,
-           atomic_load(&d->self_coid) == -1 ? ", no continuation" : "",
+    printf(", %u TXT buffer(s)%s\n", d->ntxb,
 #ifdef CTUCAN_FI
            ", fault injection build"
 #else
@@ -1313,9 +1274,8 @@ int main(int argc, char *argv[])
 
     can_slogf(SLOG2_INFO, DRV_NAME ": stopping, %u frame(s) in TXT buffers", tx_inflight(d));
     teardown(d);
-    can_slogf(SLOG2_INFO, DRV_NAME ": stopped: tx %u rx %u, pulses hw %u cont %u, unmask_err %u",
-              d->stats.transmitted_frames, d->stats.received_frames, d->x.hw_pulses, d->x.cont_pulses,
-              d->x.unmask_err);
+    can_slogf(SLOG2_INFO, DRV_NAME ": stopped: tx %u rx %u, pulses %u, unmask_err %u", d->stats.transmitted_frames,
+              d->stats.received_frames, d->x.hw_pulses, d->x.unmask_err);
     return EOK;
 
 fail:

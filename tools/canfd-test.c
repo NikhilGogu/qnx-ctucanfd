@@ -13,6 +13,8 @@
  *   canfd-test info DEV | xstats DEV | recover DEV
  *   canfd-test timing DEV BRP TS1 TS2 SJW
  *   canfd-test fi DEV SCENARIO [ARG ARG2 BUDGET FLAGS]   fault injection builds only
+ *   canfd-test fitick DEV MS               drive a fault-injection script for MS ms
+ *   canfd-test monitor DEV MS              devctls back to back while traffic runs
  *   canfd-test pulse DEV CODE              send a pulse to the driver's channel
  *   canfd-test badsize DEV                 devctls with short payloads (expect EINVAL)
  *
@@ -313,19 +315,81 @@ static int do_xstats(int fd)
         fprintf(stderr, "CTUCAN_DEVCTL_GET_XSTATS: %s\n", strerror(rc));
         return rc;
     }
-    printf("xstats: hw_pulses %u cont_pulses %u cont_sent %u unmask_err %u deferred %u rearm_pending %u "
-           "hw_while_cont %u spurious %u reports %u\n",
-           x.hw_pulses, x.cont_pulses, x.cont_sent, x.unmask_err, x.deferred, x.rearm_pending, x.hw_while_cont,
-           x.spurious, x.reports);
-    printf("xstats: rx_rejected %u rx_flushes %u rx_flushed %u\n", x.rx_rejected, x.rx_flushes, x.rx_flushed);
+    printf("xstats: hw_pulses %u deferred %u unmask_err %u rearm_pending %u spurious %u reports %u "
+           "notify_deferred %u rx_max_batch %u rx_flushes %u rx_flushed %u\n",
+           x.hw_pulses, x.deferred, x.unmask_err, x.rearm_pending, x.spurious, x.reports, x.notify_deferred,
+           x.rx_max_batch, x.rx_flushes, x.rx_flushed);
     printf("xstats: tx_started %u tx_ok %u tx_failed %u tx_aborted %u tx_lost %u tx_rejected %u tx_hw_busy %u "
-           "tx_order_err %u tx_quiesce_timeout %u tx_max_inflight %u\n",
+           "tx_order_err %u tx_quiesce_timeout %u tx_max_inflight %u tx_batches %u tx_abort_forced %u\n",
            x.tx_started, x.tx_ok, x.tx_failed, x.tx_aborted, x.tx_lost, x.tx_rejected, x.tx_hw_busy,
-           x.tx_order_err, x.tx_quiesce_timeout, x.tx_max_inflight);
-    printf("xstats: tx_batches %u ewl_up %u ewl_down %u busoff_recovered %u restarts %u fault_state 0x%x ewl %u "
-           "inflight %u fi_scenario %u fi_step %u\n",
-           x.tx_batches, x.ewl_up, x.ewl_down, x.busoff_recovered, x.restarts, (x.state >> 16) & 7u,
-           (x.state >> 8) & 1u, x.state & 0xffu, x.state >> 28, (x.state >> 24) & 0xfu);
+           x.tx_order_err, x.tx_quiesce_timeout, x.tx_max_inflight, x.tx_batches, x.tx_abort_forced);
+    printf("xstats: ewl_up %u ewl_down %u busoff_recovered %u restarts %u restart_fail %u fault_state 0x%x "
+           "busoff_hold %u ewl %u inflight %u fi_scenario %u fi_step %u\n",
+           x.ewl_up, x.ewl_down, x.busoff_recovered, x.restarts, x.restart_fail, (x.state >> 16) & 7u,
+           (x.state >> 9) & 1u, (x.state >> 8) & 1u, x.state & 0xffu, x.state >> 28, (x.state >> 24) & 0xfu);
+    return EOK;
+}
+
+/* Fault-injection builds: one CTUCAN_DEVCTL_FI_TICK per millisecond for MS ms. */
+static int do_fitick(int fd, unsigned ms)
+{
+    uint64_t end = mono_us() + (uint64_t)ms * 1000u;
+    unsigned n = 0;
+
+    while (mono_us() < end) {
+        int rc = devctl(fd, CTUCAN_DEVCTL_FI_TICK, NULL, 0, NULL);
+        if (rc != EOK) {
+            fprintf(stderr, "CTUCAN_DEVCTL_FI_TICK: %s\n", strerror(rc));
+            return rc;
+        }
+        n++;
+        usleep(1000);
+    }
+    printf("fitick: %u ticks\n", n);
+    return EOK;
+}
+
+/* Devctls back to back for MS ms while traffic runs: how often the received
+ * count was seen between its first and last value (devctls answered between
+ * interrupt batches) and the longest a devctl took. */
+static int do_monitor(int fd, unsigned ms)
+{
+    uint64_t end = mono_us() + (uint64_t)ms * 1000u, worst = 0, t_last = 0;
+    unsigned samples = 0, *vals = calloc(200000, sizeof(unsigned));
+    CAN_DEVCTL_STATS st;
+
+    if (vals == NULL) {
+        return ENOMEM;
+    }
+    while (mono_us() < end && samples < 200000) {
+        uint64_t t = mono_us();
+        int rc = devctl(fd, CAN_DEVCTL_GET_STATS, &st, sizeof(st), NULL);
+        uint64_t dt = mono_us() - t;
+        if (rc != EOK) {
+            fprintf(stderr, "CAN_DEVCTL_GET_STATS: %s\n", strerror(rc));
+            free(vals);
+            return rc;
+        }
+        vals[samples++] = st.received_frames;
+        if (samples > 1 && vals[samples - 1] != vals[samples - 2]) {
+            t_last = t;     /* traffic was still moving */
+        }
+        if (dt > worst && t_last != 0) {
+            worst = dt;     /* only devctls during the traffic */
+        }
+    }
+    unsigned first = vals[0], last = vals[samples - 1], between = 0, steps = 0;
+    for (unsigned i = 0; i < samples; i++) {
+        if (vals[i] > first && vals[i] < last) {
+            between++;
+        }
+        if (i > 0 && vals[i] != vals[i - 1]) {
+            steps++;
+        }
+    }
+    printf("monitor: %u devctls, received %u -> %u in %u steps, %u answered while frames were still coming, "
+           "longest %llu us\n", samples, first, last, steps, between, (unsigned long long)worst);
+    free(vals);
     return EOK;
 }
 
@@ -385,6 +449,10 @@ int main(int argc, char *argv[])
         printf("SET_MID/2: %s\nWRITE_CANMSG_EXT/40: %s\nSET_TIMING/4: %s\n", strerror(r1), strerror(r2),
                strerror(r3));
         rc = r1 == EINVAL && r2 == EINVAL && r3 == EINVAL ? EOK : EIO;
+    } else if (strcmp(cmd, "fitick") == 0 && argc > 3) {
+        rc = do_fitick(fd, (unsigned)strtoul(argv[3], NULL, 0));
+    } else if (strcmp(cmd, "monitor") == 0 && argc > 3) {
+        rc = do_monitor(fd, (unsigned)strtoul(argv[3], NULL, 0));
     } else if (strcmp(cmd, "pulse") == 0 && argc > 3) {
         /* an fd is a connection to the driver's channel, so it carries pulses */
         rc = MsgSendPulse(fd, -1, atoi(argv[3]), 0) == -1 ? errno : EOK;

@@ -182,10 +182,12 @@ void ctucan_hw_rx_flush(const ctucan_hw_t *hw)
 }
 
 /*
- * Pops one frame. Returns EOK; EBADMSG when the frame was popped whole but its
- * format word does not match its word count (the frame is dropped); or EIO
- * when the word count itself cannot be trusted, in which case the caller must
- * flush the FIFO because frame boundaries are lost.
+ * Pops one frame. The format word is checked against itself before anything
+ * else is read: RWCNT must be what its DLC and frame format need (a remote
+ * frame: 3, or 3 plus the data words as QEMU 6.2 stores it) and no more than
+ * the FIFO holds. On any mismatch nothing more is consumed and EIO is
+ * returned; the caller must then flush the FIFO, because where the next frame
+ * starts is unknown and its payload could pass for a format word.
  */
 int ctucan_hw_rx(const ctucan_hw_t *hw, CAN_MSG *msg, ctucan_flags_t *fl)
 {
@@ -193,35 +195,26 @@ int ctucan_hw_rx(const ctucan_hw_t *hw, CAN_MSG *msg, ctucan_flags_t *fl)
     unsigned used = RXMI_SIZE(mi) - RXMI_FREE(mi);
     uint32_t ffw = ctucan_rd(hw, CTUCAN_RX_DATA);
     unsigned rwcnt = (ffw >> FFW_RWCNT_SHIFT) & FFW_RWCNT_MASK;
-    uint32_t w[FFW_RWCNT_MASK + 1];
-
-    /* identifier + two timestamp words + at most 16 data words, and no more
-     * than the FIFO holds */
-    if (rwcnt < 3 || rwcnt > 3 + 16 || rwcnt + 1 > used) {
-        return EIO;
-    }
-    for (unsigned i = 0; i < rwcnt; i++) {
-        w[i] = ctucan_rd(hw, CTUCAN_RX_DATA);
-    }
-
     bool fdf = (ffw & FFW_FDF) != 0;
     bool rtr = (ffw & FFW_RTR) != 0;
     unsigned len = ctucan_dlc2len(ffw & FFW_DLC_MASK, fdf);
     unsigned dwords = (len + 3u) / 4u;
+    uint32_t w[3 + 16];
     bool ok;
 
     if (rtr) {
-        /* Silicon stores no data words for a remote frame (RWCNT 3, datasheet);
-         * QEMU 6.2 stores DLC worth of them. CAN FD has no remote frames. */
-        ok = !fdf && (rwcnt == 3 || rwcnt == 3 + dwords);
+        ok = !fdf && (rwcnt == 3 || rwcnt == 3 + dwords);   /* CAN FD has no remote frames */
     } else {
         ok = rwcnt == 3 + dwords;
     }
     if (!fdf && (ffw & (FFW_BRS | FFW_ESI)) != 0) {
         ok = false;     /* bit rate switch and ESI exist only in CAN FD frames */
     }
-    if (!ok) {
-        return EBADMSG;
+    if (!ok || rwcnt + 1 > used) {
+        return EIO;
+    }
+    for (unsigned i = 0; i < rwcnt; i++) {
+        w[i] = ctucan_rd(hw, CTUCAN_RX_DATA);
     }
 
     memset(msg, 0, sizeof(*msg));
