@@ -23,6 +23,9 @@
  * "hybrid/EV battery pack remaining life", SAE J1979) is answered with
  * 7E8#03415Bxx0000000000, xx = state of charge * 255 / 100.
  *
+ * Echo, for round-trip tests from another node: a data frame on 0x1E0 is
+ * sent back unchanged on 0x1E8 (a 64-byte request gives a 64-byte CAN FD reply).
+ *
  * When the driver goes away (restart, crash) every devctl fails; each thread
  * then reopens its device every millisecond until the driver is back. A
  * period that is already over when the thread wakes (an overrun, or time
@@ -48,7 +51,10 @@ static const char *g_tx = "/dev/can1/tx1", *g_rx = "/dev/can1/rx0";
 static uint32_t g_id = 0x18f;
 static unsigned g_period_us = 10000, g_prio = 30;
 static unsigned long g_count;
-static atomic_uint g_reopens, g_answers, g_soc = 80;
+static atomic_uint g_reopens, g_answers, g_echoes, g_soc = 80;
+
+#define ECHO_REQ 0x1e0u
+#define ECHO_RSP 0x1e8u
 static volatile sig_atomic_t g_stop;
 
 static uint64_t now_us(void)
@@ -124,18 +130,29 @@ static void *diag_thread(void *arg)
             }
             continue;
         }
-        if (m.ext.is_extended_mid || ((m.mid >> 18) & 0x7ffu) != 0x7df || m.len < 3 || m.dat[0] != 2 ||
-            m.dat[1] != 0x01 || m.dat[2] != 0x5b) {
+        if (m.ext.is_extended_mid || m.ext.is_remote_frame) {
             continue;
         }
+        uint32_t id = (m.mid >> 18) & 0x7ffu;
+        atomic_uint *counter;
         CAN_MSG r;
         memset(&r, 0, sizeof(r));
-        r.mid = 0x7e8u << 18;
-        r.len = 8;
-        r.dat[0] = 3;
-        r.dat[1] = 0x41;
-        r.dat[2] = 0x5b;
-        r.dat[3] = (uint8_t)(atomic_load(&g_soc) * 255u / 100u);
+        if (id == ECHO_REQ && m.len <= CAN_MSG_DATA_MAX) {
+            r.mid = ECHO_RSP << 18;
+            r.len = m.len;
+            memcpy(r.dat, m.dat, m.len);
+            counter = &g_echoes;
+        } else if (id == 0x7df && m.len >= 3 && m.dat[0] == 2 && m.dat[1] == 0x01 && m.dat[2] == 0x5b) {
+            r.mid = 0x7e8u << 18;
+            r.len = 8;
+            r.dat[0] = 3;
+            r.dat[1] = 0x41;
+            r.dat[2] = 0x5b;
+            r.dat[3] = (uint8_t)(atomic_load(&g_soc) * 255u / 100u);
+            counter = &g_answers;
+        } else {
+            continue;
+        }
         while (!g_stop && (rc = devctl(tfd, CAN_DEVCTL_WRITE_CANMSG_EXT, &r, sizeof(r), NULL)) != EOK) {
             if (rc == EAGAIN) {
                 usleep(200);
@@ -143,7 +160,7 @@ static void *diag_thread(void *arg)
                 tfd = reopen(g_tx, tfd, O_WRONLY, "diag tx");
             }
         }
-        atomic_fetch_add(&g_answers, 1);
+        atomic_fetch_add(counter, 1);
     }
     return NULL;
 }
@@ -187,7 +204,8 @@ int main(int argc, char *argv[])
         return 1;
     }
     int fd = reopen(g_tx, -1, O_WRONLY, "telemetry");
-    printf("ecu-sim: telemetry id %03X every %u us on %s, diagnostics on %s\n", g_id, g_period_us, g_tx, g_rx);
+    printf("ecu-sim: telemetry id %03X every %u us on %s, diagnostics and echo (%03X -> %03X) on %s\n", g_id,
+           g_period_us, g_tx, ECHO_REQ, ECHO_RSP, g_rx);
     fflush(stdout);
 
     struct timespec next;
@@ -244,7 +262,7 @@ int main(int argc, char *argv[])
         }
     }
     g_stop = 1;
-    printf("ecu-sim: sent %lu, missed %lu (overruns %lu), reopens %u, diagnostic answers %u\n", sent, missed,
-           overruns, atomic_load(&g_reopens), atomic_load(&g_answers));
+    printf("ecu-sim: sent %lu, missed %lu (overruns %lu), reopens %u, diagnostic answers %u, echoes %u\n", sent,
+           missed, overruns, atomic_load(&g_reopens), atomic_load(&g_answers), atomic_load(&g_echoes));
     return 0;
 }

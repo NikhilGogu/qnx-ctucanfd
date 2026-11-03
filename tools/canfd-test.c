@@ -17,6 +17,12 @@
  *   canfd-test monitor DEV MS              devctls back to back while traffic runs
  *   canfd-test pulse DEV CODE              send a pulse to the driver's channel
  *   canfd-test badsize DEV                 devctls with short payloads (expect EINVAL)
+ *   canfd-test tester RXDEV TXDEV SECONDS [GAP_US]   the far end of ecu-sim on another node
+ *
+ * tester checks every ecu-sim telemetry frame (0x18F: 64 bytes, CRC-8,
+ * sequence) for SECONDS, sends a 64-byte CAN FD echo request (0x1E0) every
+ * GAP_US (10000) and times its reply (0x1E8) on this node's clock, and sends
+ * the diagnostic request 7DF#02015B once a second and times the 7E8 answer.
  *
  * Sequenced frames: bytes 0..3 hold a little-endian sequence number, byte i
  * (i >= 4) holds (seq + i) & 0xff. Both seqsend and the host test scripts use
@@ -25,6 +31,9 @@
 #include <devctl.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <pthread.h>
+#include <stdatomic.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -394,10 +403,214 @@ static int do_monitor(int fd, unsigned ms)
     return EOK;
 }
 
+static uint8_t crc8(const uint8_t *p, unsigned n)
+{
+    uint8_t c = 0xff;
+
+    while (n-- > 0) {
+        c ^= *p++;
+        for (int b = 0; b < 8; b++) {
+            c = (uint8_t)(c & 0x80 ? (c << 1) ^ 0x1d : c << 1);
+        }
+    }
+    return c;
+}
+
+static struct {
+    int fd;
+    unsigned n, gap_us;
+    _Atomic uint64_t *sent_us;  /* send time of echo k, 0 = not sent yet */
+    _Atomic uint64_t diag_us;   /* send time of the outstanding diagnostic request, 0 = none */
+    atomic_uint diag_sent;
+    atomic_int err;
+} g_tx;
+
+static int send_retry(const CAN_MSG *m)
+{
+    int rc;
+
+    while ((rc = write_msg(g_tx.fd, m)) == EAGAIN) {
+        usleep(200);
+    }
+    return rc;
+}
+
+static void *tester_tx(void *arg)
+{
+    (void)arg;
+    CAN_MSG e, d;
+    uint64_t next = mono_us();
+
+    memset(&e, 0, sizeof(e));
+    e.mid = 0x1e0u << 18;
+    e.len = 64;
+    memset(&d, 0, sizeof(d));
+    d.mid = 0x7dfu << 18;
+    d.len = 8;
+    d.dat[0] = 2;
+    d.dat[1] = 0x01;
+    d.dat[2] = 0x5b;
+    unsigned per_s = 1000000u / g_tx.gap_us;
+    for (unsigned k = 0; k < g_tx.n; k++) {
+        uint64_t now = mono_us();
+        if (next > now) {
+            usleep((useconds_t)(next - now));
+        }
+        next += g_tx.gap_us;
+        seq_fill(&e, k, 64);
+        atomic_store(&g_tx.sent_us[k], mono_us());
+        int rc = send_retry(&e);
+        if (rc == EOK && per_s != 0 && k % per_s == per_s / 2) {
+            atomic_store(&g_tx.diag_us, mono_us());
+            rc = send_retry(&d);
+            atomic_fetch_add(&g_tx.diag_sent, 1);
+        }
+        if (rc != EOK) {
+            atomic_store(&g_tx.err, rc);
+            break;
+        }
+    }
+    return NULL;
+}
+
+static int cmp_u32(const void *a, const void *b)
+{
+    uint32_t x = *(const uint32_t *)a, y = *(const uint32_t *)b;
+    return x < y ? -1 : x > y;
+}
+
+static int do_tester(int rfd, int argc, char *argv[])
+{
+    if (argc < 5) {
+        return EINVAL;
+    }
+    unsigned secs = (unsigned)strtoul(argv[4], NULL, 0);
+    g_tx.gap_us = argc > 5 ? (unsigned)strtoul(argv[5], NULL, 0) : 10000u;
+    if (secs == 0 || g_tx.gap_us < 100) {
+        return EINVAL;
+    }
+    g_tx.fd = open(argv[3], O_RDWR);
+    if (g_tx.fd == -1) {
+        fprintf(stderr, "open %s: %s\n", argv[3], strerror(errno));
+        return EIO;
+    }
+    g_tx.n = (unsigned)((uint64_t)secs * 1000000u / g_tx.gap_us);
+    g_tx.sent_us = calloc(g_tx.n, sizeof(*g_tx.sent_us));
+    uint8_t *answered = calloc(g_tx.n, 1);
+    uint32_t *rtt = calloc(g_tx.n, sizeof(*rtt));
+    if (g_tx.sent_us == NULL || answered == NULL || rtt == NULL) {
+        return ENOMEM;
+    }
+    /* a reader blocked on a silent bus never returns; the kill is the timeout */
+    alarm(secs + 10);
+
+    unsigned tel = 0, bad_len = 0, bad_crc = 0, missing = 0, ooo = 0, echo_ok = 0, echo_bad = 0, echo_dup = 0;
+    unsigned diag_ok = 0, unexpected = 0, other = 0;
+    uint32_t first = 0, expect = 0, ts_last = 0, d_min = UINT32_MAX, d_max = 0, diag_min = UINT32_MAX, diag_max = 0;
+    uint64_t d_sum = 0;
+    pthread_t tid;
+    uint64_t end = mono_us() + (uint64_t)secs * 1000000u + 300000u;
+    if (pthread_create(&tid, NULL, tester_tx, NULL) != EOK) {
+        return EIO;
+    }
+    while (mono_us() < end) {
+        CAN_MSG m;
+        memset(&m, 0, sizeof(m));
+        int rc = devctl(rfd, CAN_DEVCTL_READ_CANMSG_EXT, &m, sizeof(m), NULL);
+        uint64_t t = mono_us();
+        if (rc != EOK) {
+            fprintf(stderr, "tester: read: %s\n", strerror(rc));
+            return rc;
+        }
+        uint32_t id = (m.mid >> 18) & 0x7ffu;
+        uint32_t seq = (uint32_t)m.dat[0] | (uint32_t)m.dat[1] << 8 | (uint32_t)m.dat[2] << 16 |
+                       (uint32_t)m.dat[3] << 24;
+        if (m.ext.is_extended_mid || m.ext.is_remote_frame) {
+            other++;
+        } else if (id == 0x18f) {
+            if (m.len != 64) {
+                bad_len++;
+                continue;
+            }
+            if (crc8(m.dat, 63) != m.dat[63]) {
+                bad_crc++;
+                continue;
+            }
+            if (tel++ == 0) {
+                first = seq;
+            } else if (seq > expect) {
+                missing += seq - expect;
+            } else if (seq < expect) {
+                ooo++;
+                continue;
+            }
+            expect = seq + 1;
+            /* the driver's receive timestamp (CLOCK_MONOTONIC, us), so frames
+             * that waited in the mailbox queue keep their arrival time */
+            if (tel > 1) {
+                uint32_t d = m.ext.timestamp - ts_last;
+                d_sum += d;
+                d_min = d < d_min ? d : d_min;
+                d_max = d > d_max ? d : d_max;
+            }
+            ts_last = m.ext.timestamp;
+        } else if (id == 0x1e8) {
+            CAN_MSG want;
+            seq_fill(&want, seq, 64);
+            uint64_t ts = seq < g_tx.n ? atomic_load(&g_tx.sent_us[seq]) : 0;
+            if (ts == 0) {
+                unexpected++;   /* nothing sent with this number: left over from an earlier run */
+            } else if (m.len != 64 || memcmp(m.dat, want.dat, 64) != 0) {
+                echo_bad++;
+            } else if (answered[seq]) {
+                echo_dup++;
+            } else {
+                answered[seq] = 1;
+                rtt[echo_ok++] = (uint32_t)(t - ts);
+            }
+        } else if (id == 0x7e8) {
+            uint64_t ts = atomic_exchange(&g_tx.diag_us, 0);
+            if (ts != 0 && m.len >= 4 && m.dat[0] == 3 && m.dat[1] == 0x41 && m.dat[2] == 0x5b) {
+                uint32_t d = (uint32_t)(t - ts);
+                diag_min = d < diag_min ? d : diag_min;
+                diag_max = d > diag_max ? d : diag_max;
+                diag_ok++;
+            } else {
+                unexpected++;
+            }
+        } else {
+            other++;
+        }
+    }
+    pthread_join(tid, NULL);
+    unsigned dn = atomic_load(&g_tx.diag_sent);
+    printf("tester: telemetry 18F: %u frames, seq %u..%u, missing %u, out_of_order %u, bad_crc %u, bad_len %u; "
+           "period at this driver mean %.3f ms, min %.3f, max %.3f\n", tel, first, tel ? expect - 1 : 0, missing,
+           ooo, bad_crc, bad_len, tel > 1 ? (double)d_sum / (tel - 1) / 1000.0 : 0.0,
+           tel > 1 ? d_min / 1000.0 : 0.0, d_max / 1000.0);
+    qsort(rtt, echo_ok, sizeof(*rtt), cmp_u32);
+    uint64_t r_sum = 0;
+    for (unsigned i = 0; i < echo_ok; i++) {
+        r_sum += rtt[i];
+    }
+#define PCT(q) (echo_ok ? rtt[(unsigned)((uint64_t)(echo_ok - 1) * (q) / 100)] : 0)
+    printf("tester: echo 1E0->1E8: %u sent, %u answered, lost %u, bad %u, duplicate %u; round trip us min %u, "
+           "p50 %u, p99 %u, max %u, mean %.0f\n", g_tx.n, echo_ok, g_tx.n - echo_ok, echo_bad, echo_dup, PCT(0),
+           PCT(50), PCT(99), PCT(100), echo_ok ? (double)r_sum / echo_ok : 0.0);
+#undef PCT
+    printf("tester: diagnostics 7DF->7E8: %u sent, %u answered; round trip us min %u, max %u; unexpected %u, "
+           "other %u, tx error %d\n", dn, diag_ok, diag_ok ? diag_min : 0, diag_max, unexpected, other,
+           atomic_load(&g_tx.err));
+    bool ok = tel > 0 && missing == 0 && ooo == 0 && bad_crc == 0 && bad_len == 0 && echo_ok == g_tx.n &&
+              echo_bad == 0 && echo_dup == 0 && diag_ok == dn && atomic_load(&g_tx.err) == 0;
+    printf("tester: %s\n", ok ? "PASS" : "FAIL");
+    return ok ? EOK : EIO;
+}
+
 int main(int argc, char *argv[])
 {
     if (argc < 3) {
-        fprintf(stderr, "usage: canfd-test send|write|recv|seqsend|seqrecv|info|xstats|recover|timing|fi|pulse DEV ...\n");
+        fprintf(stderr, "usage: canfd-test send|write|recv|seqsend|seqrecv|info|xstats|recover|timing|fi|pulse|tester DEV ...\n");
         return 1;
     }
     int fd = open(argv[2], O_RDWR);
@@ -450,6 +663,8 @@ int main(int argc, char *argv[])
         printf("SET_MID/2: %s\nWRITE_CANMSG_EXT/40: %s\nSET_TIMING/4: %s\n", strerror(r1), strerror(r2),
                strerror(r3));
         rc = r1 == EINVAL && r2 == EINVAL && r3 == EINVAL ? EOK : EIO;
+    } else if (strcmp(cmd, "tester") == 0) {
+        rc = do_tester(fd, argc, argv);
     } else if (strcmp(cmd, "fitick") == 0 && argc > 3) {
         rc = do_fitick(fd, (unsigned)strtoul(argv[3], NULL, 0));
     } else if (strcmp(cmd, "monitor") == 0 && argc > 3) {
