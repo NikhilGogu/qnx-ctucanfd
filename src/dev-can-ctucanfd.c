@@ -70,6 +70,7 @@ struct drv {
     bool             in_event;
     int64_t          ts_delta;
     uint32_t         fault;
+    uint32_t         late_events;   /* events caught by the post-unmask re-check */
     CAN_DEVCTL_STATS stats;
 };
 
@@ -260,18 +261,8 @@ static void service(drv_t *d)
     }
 }
 
-static CANDEV *cb_event(void *const hdl, const int code)
+static CANDEV *next_report(drv_t *d)
 {
-    drv_t *d = hdl;
-
-    if (code != PULSE_CODE_IRQ) {
-        return NULL;
-    }
-    if (!d->in_event) {
-        d->in_event = true;
-        service(d);
-    }
-    /* libcan calls back until NULL: return each mailbox with news once. */
     for (unsigned i = 0; i < d->nrx; i++) {
         if (d->rx[i].report) {
             d->rx[i].report = false;
@@ -284,8 +275,40 @@ static CANDEV *cb_event(void *const hdl, const int code)
             return &d->tx[i].cdev;
         }
     }
+    return NULL;
+}
+
+static CANDEV *cb_event(void *const hdl, const int code)
+{
+    drv_t *d = hdl;
+    CANDEV *c;
+
+    if (code != PULSE_CODE_IRQ) {
+        return NULL;
+    }
+    if (!d->in_event) {
+        d->in_event = true;
+        service(d);
+    }
+    for (;;) {
+        /* libcan calls back until NULL: return each mailbox with news once. */
+        if ((c = next_report(d)) != NULL) {
+            return c;
+        }
+        InterruptUnmask(d->irq, d->iid);
+        /* An event that arrived after the last status read found the line
+         * masked. On this route (IRQ 10 in QEMU) no second interrupt comes
+         * for a line that is already high, so the FIFO would fill and stall.
+         * Check again now that the line is unmasked; anything later raises
+         * a fresh interrupt. */
+        if ((ctucan_rd(&d->hw, CTUCAN_INT_STAT) & d->int_ena) == 0) {
+            break;
+        }
+        InterruptMask(d->irq, d->iid);
+        d->late_events++;
+        service(d);
+    }
     d->in_event = false;
-    InterruptUnmask(d->irq, d->iid);
     return NULL;
 }
 
@@ -336,6 +359,7 @@ static void dump_regs(const drv_t *d)
     for (size_t i = 0; i < sizeof(regs) / sizeof(regs[0]); i++) {
         can_slogf(SLOG2_INFO, DRV_NAME ": %-12s 0x%08x", regs[i].name, ctucan_rd(&d->hw, regs[i].off));
     }
+    can_slogf(SLOG2_INFO, DRV_NAME ": late events %u, tx_busy %d", d->late_events, d->tx_busy);
 }
 
 static int cb_devctl(CANDEV *cdev, io_devctl_t *msg)
