@@ -8,10 +8,12 @@ Runs on the build box against a QEMU target started with scripts/qemu-can.sh
 SocketCAN socket, so every frame is checked in full: identifier, format,
 length, every payload byte including padding, and sequence numbers.
 
-    scripts/tests/ctutest.py [--target tc] [--if vcan0] [--list] [TEST ...]
+    scripts/tests/ctutest.py [--target tc] [--peer tc2] [--if vcan0] [--list] [TEST ...]
 
 Tests whose name starts with fi_ run against the fault-injection build
-(make FI=1). Exit status 0 only if every selected test passed.
+(make FI=1). two_nodes needs a second target on the same host interface
+(--peer) and is skipped without one. Exit status 0 only if no selected test
+failed.
 """
 import argparse
 import hashlib
@@ -51,6 +53,13 @@ class Fail(Exception):
     pass
 
 
+class Skip(Exception):
+    pass
+
+
+PEER = None     # second target for two_nodes (--peer)
+
+
 def check(cond, msg):
     if not cond:
         raise Fail(msg)
@@ -80,7 +89,7 @@ class Target:
             if p.returncode == 0:
                 got = self.out(f"md5sum {remote}").split()
                 if got and got[0] == want:
-                    Target.deployed[remote] = want
+                    Target.deployed[f"{self.name}:{os.path.basename(remote)}"] = want
                     return
                 err = f"md5 on the target {got[:1]} differs from {want}"
             else:
@@ -481,7 +490,8 @@ class Candump:
         for ln in open(self.path):
             m = CDLINE.match(ln)
             if m:
-                frames.append(dict(t=float(m.group(1)), id=int(m.group(2), 16), data=bytes.fromhex(m.group(4))))
+                frames.append(dict(t=float(m.group(1)), id=int(m.group(2), 16), fdflags=m.group(3),
+                                   data=bytes.fromhex(m.group(4))))
         os.unlink(self.path)
         return frames
 
@@ -593,6 +603,56 @@ def t_ecu_sim(t, bus, seconds=30):
             f"{mean:.3f} ms, sd {sd:.3f}, min {d[0]:.3f}, p1 {p(0.01):.3f}, p99 {p(0.99):.3f}, max {d[-1]:.3f} ms; "
             f"7DF 02 01 5B answered by 7E8 03 41 5B (SOC {soc:.0f} %) {(rsp[0]['t'] - t_req) * 1000:.1f} ms after "
             f"cansend; {log.strip().splitlines()[-1]}")
+
+
+def t_two_nodes(t, bus, seconds=30):
+    """Two QNX nodes on one bus (--peer): ecu-sim on the target, canfd-test tester on the peer, candump observing."""
+    if PEER is None:
+        raise Skip("needs a second target on the same host interface (--peer)")
+    p = Target(PEER)
+    for n in (t, p):
+        deploy_tools(n)
+        n.driver(force=True)
+    cd = Candump(bus_if(bus), "18F:7FF,1E0:7FF,1E8:7FF,7DF:7FF,7E8:7FF")
+    t.bg("/tmp/ecu-sim", "/tmp/ecu.log")
+    time.sleep(0.5)
+    rc, out = p.ssh(f"{TEST} tester {RX0} {TX1} {seconds}", timeout=seconds + 30)
+    time.sleep(0.3)
+    frames = cd.stop()
+    t.ssh("slay -s TERM ecu-sim; sleep 0.3")
+    elog = t.out("cat /tmp/ecu.log").strip().splitlines()
+    p.stop_all()
+    bus.drain()
+    check(rc == 0 and "tester: PASS" in out, f"tester on {p.name}: {out.strip()}")
+    n_tel, s0, s1 = map(int, re.search(r"telemetry 18F: (\d+) frames, seq (\d+)\.\.(\d+)", out).groups())
+    e = re.search(r"echo 1E0->1E8: (\d+) sent, (\d+) answered.*round trip us min (\d+), p50 (\d+), p99 (\d+), "
+                  r"max (\d+), mean (\d+)", out)
+    n_echo = int(e.group(1))
+    n_diag = int(re.search(r"diagnostics 7DF->7E8: (\d+) sent", out).group(1))
+    by = lambda i: [f for f in frames if f["id"] == i]
+    tel, req, rsp = by(0x18F), by(0x1E0), by(0x1E8)
+    # candump -L writes CAN FD flags as one hex digit after "##"; bit 0 is BRS
+    fdbrs = lambda fs: all(f["fdflags"] is not None and int(f["fdflags"], 16) & 1 and len(f["data"]) == 64
+                           for f in fs)
+    # the host saw every telemetry period, and the peer got each one in the range it reports
+    tseq = [seq_of(f["data"]) for f in tel]
+    check(tseq == list(range(tseq[0], tseq[0] + len(tseq))), f"telemetry sequence holes on {bus_if(bus)}")
+    check(all(crc8(f["data"][:63]) == f["data"][63] for f in tel) and fdbrs(tel), "telemetry frame on the host")
+    check(tseq[0] <= s0 and s1 <= tseq[-1] and n_tel == s1 - s0 + 1, f"peer range {s0}..{s1} vs host {tseq[0]}..")
+    for what, fs in (("echo requests", req), ("echo replies", rsp)):
+        check([seq_of(f["data"]) for f in fs] == list(range(n_echo)), f"{what} on {bus_if(bus)}: sequence")
+        check(all(f["data"] == pattern(seq_of(f["data"]), 64) for f in fs) and fdbrs(fs), f"{what}: payload")
+    check(len(by(0x7DF)) == n_diag and len(by(0x7E8)) == n_diag, f"diagnostic frames on {bus_if(bus)}")
+    check(f"echoes {n_echo}" in elog[-1] and f"diagnostic answers {n_diag}" in elog[-1], f"ecu-sim: {elog[-1]}")
+    turn = sorted((b["t"] - a["t"]) * 1000 for a, b in zip(req, rsp))
+    q = lambda v, x: v[min(len(v) - 1, int(x * len(v)))]
+    return (f"{t.name} -> {p.name}: {n_tel} telemetry frames (64-byte CAN FD with BRS), seq {s0}..{s1}, CRC and "
+            f"sequence clean on {p.name} and on {bus_if(bus)}; {p.name} -> {t.name} -> {p.name}: {n_echo}/{n_echo} "
+            f"64-byte echo round trips, every byte checked on {p.name} and on {bus_if(bus)}; QEMU timing: round trip "
+            f"on {p.name}'s clock min {int(e.group(3)) / 1000:.3f} ms, p50 {int(e.group(4)) / 1000:.3f}, p99 "
+            f"{int(e.group(5)) / 1000:.3f}, max {int(e.group(6)) / 1000:.3f}; of that, {t.name} between request and "
+            f"reply on {bus_if(bus)} p50 {q(turn, 0.5):.3f} ms, p99 {q(turn, 0.99):.3f}, max {turn[-1]:.3f}; "
+            f"{n_diag}/{n_diag} diagnostic requests answered; peer: {out.strip().splitlines()[0]}; {elog[-1]}")
 
 
 def crc8(data):
@@ -1049,7 +1109,7 @@ TESTS = [v for k, v in sorted(globals().items()) if k.startswith("t_")]
 ORDER = ["tx_lengths", "rx_lengths", "rtr", "ids", "write_path", "extended_mailbox", "readers", "writers",
          "rx_overflow", "bidir", "burst_batches", "tx_order", "devctl_sizes", "timing", "spoofed_irq_pulse",
          "fi_rejected_normal", "sigterm", "restart_under_load", "supervisor_readiness", "supervisor_hang",
-         "ecu_sim", "fi_warn",
+         "ecu_sim", "two_nodes", "fi_warn",
          "fi_passive", "fi_busoff_auto", "fi_busoff_latch", "fi_busoff_manual", "fi_busoff_stuck_abort",
          "fi_busoff_abort_notick", "fi_txdelay", "fi_tx_budget", "fi_quiesce", "fi_reset_retry", "fi_reset_storm",
          "fi_state_clear", "fi_batches", "fi_reader_budget", "fi_reader_nowake", "fi_tx_order", "fi_tx_order_fixed",
@@ -1059,6 +1119,7 @@ ORDER = ["tx_lengths", "rx_lengths", "rtr", "ids", "write_path", "extended_mailb
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--target", default="tc")
+    ap.add_argument("--peer", help="second target on the same host interface, for two_nodes")
     ap.add_argument("--if", dest="ifname", default="vcan0")
     ap.add_argument("--list", action="store_true")
     ap.add_argument("tests", nargs="*")
@@ -1070,19 +1131,24 @@ def main():
             print(f"{n:20} {by_name[n].__doc__}")
         return 0
     sel = a.tests or names
+    global PEER
+    PEER = a.peer
     t, bus = Target(a.target), Bus(a.ifname)
-    failed = 0
+    failed = skipped = 0
     for n in sel:
         t0 = time.monotonic()
         try:
             detail = by_name[n](t, bus)
             print(f"PASS {n}: {detail} ({time.monotonic() - t0:.1f} s)", flush=True)
-        except (Fail, subprocess.TimeoutExpired) as e:
+        except Skip as e:
+            skipped += 1
+            print(f"SKIP {n}: {e}", flush=True)
+        except (Fail, subprocess.TimeoutExpired, AttributeError, ValueError, IndexError) as e:
             failed += 1
-            print(f"FAIL {n}: {e} ({time.monotonic() - t0:.1f} s)", flush=True)
+            print(f"FAIL {n}: {type(e).__name__}: {e} ({time.monotonic() - t0:.1f} s)", flush=True)
     print(f"deployed files checked by md5 on the target after copying: {len(Target.deployed)} "
-          f"({', '.join(sorted(os.path.basename(k) for k in Target.deployed))})")
-    print(f"{len(sel) - failed} of {len(sel)} passed")
+          f"({', '.join(sorted(Target.deployed))})")
+    print(f"{len(sel) - failed - skipped} of {len(sel) - skipped} passed" + (f", {skipped} skipped" if skipped else ""))
     return 1 if failed else 0
 
 
