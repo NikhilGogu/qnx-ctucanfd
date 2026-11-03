@@ -85,7 +85,7 @@ class Target:
         """(Re)starts the driver unless it already runs with these arguments."""
         if not force and self.variant == variant and self.args == args and self.alive():
             return
-        self.ssh("slay -f -s KILL dev-can-ctucanfd canfd-test ecu-sim ctucan-supervisor >/dev/null 2>&1; true")
+        self.stop_all()
         build = os.path.join(ROOT, "build", variant)
         for f in ("dev-can-ctucanfd", "canfd-test"):
             self.put(os.path.join(build, f), f"/tmp/{f}")
@@ -95,6 +95,12 @@ class Target:
         check("rc=0" in out and "CTU CAN FD" in out and "tx1" in out, f"driver start failed: {out.strip()}")
         check("no continuation" not in out, f"driver has no continuation channel: {out.strip()}")
         self.variant, self.args = variant, args
+
+    def stop_all(self):
+        # the supervisor first, or it would start the driver again
+        self.ssh("slay -f -s KILL ctucan-supervisor >/dev/null 2>&1; "
+                 "slay -f -s KILL dev-can-ctucanfd canfd-test ecu-sim >/dev/null 2>&1; true")
+        self.variant = None
 
     def alive(self):
         return "dev-can-ctucanfd" in self.out("pidin -p dev-can-ctucanfd -f a 2>/dev/null")
@@ -136,7 +142,7 @@ class Bus:
         s.setsockopt(socket.SOL_CAN_RAW, socket.CAN_RAW_FD_FRAMES, 1)
         s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 << 20)
         s.bind((ifname,))
-        self.s = s
+        self.s, self.ifname = s, ifname
 
     def drain(self):
         while select.select([self.s], [], [], 0)[0]:
@@ -445,6 +451,79 @@ def t_tx_order(t, bus):
             f"{x['tx_batches']} multi-buffer TX commands")
 
 
+CDLINE = re.compile(r"^\((\d+\.\d+)\) \S+ ([0-9A-F]+)(?:##([0-9A-F])|#)([0-9A-F]*)")
+
+
+class Candump:
+    """candump -L on the host; frames come back with candump's own timestamps."""
+
+    def __init__(self, ifname, filt):
+        self.path = f"/tmp/ctutest-candump-{os.getpid()}.log"
+        self.f = open(self.path, "w")
+        self.p = subprocess.Popen(["candump", "-L", f"{ifname},{filt}"], stdout=self.f, stderr=subprocess.STDOUT)
+        time.sleep(0.3)
+
+    def stop(self):
+        self.p.terminate()
+        self.p.wait()
+        self.f.close()
+        frames = []
+        for ln in open(self.path):
+            m = CDLINE.match(ln)
+            if m:
+                frames.append(dict(t=float(m.group(1)), id=int(m.group(2), 16), data=bytes.fromhex(m.group(4))))
+        os.unlink(self.path)
+        return frames
+
+
+def deploy_tools(t):
+    t.stop_all()
+    for f in ("dev-can-ctucanfd", "canfd-test", "ecu-sim", "ctucan-supervisor"):
+        t.put(os.path.join(ROOT, "build", "x86_64", f), f"/tmp/{f}")
+
+
+def wait_path(t, path):
+    out = t.out(f"for i in $(seq 1 50); do [ -e {path} ] && echo up && break; sleep 0.1; done")
+    check("up" in out, f"{path} did not appear")
+
+
+def t_restart_under_load(t, bus, kills=3):
+    """slay -s KILL under load: the supervisor restarts the driver, ecu-sim reopens; gap from candump."""
+    deploy_tools(t)
+    t.bg("/tmp/ctucan-supervisor -- /tmp/dev-can-ctucanfd", "/tmp/sup.log")
+    wait_path(t, TX1)
+    t.bg("/tmp/ecu-sim -p 1000 -i 2F8", "/tmp/ecu.log")
+    cd = Candump(bus_if(bus), "2F8:7FF")
+    load = subprocess.Popen(["cangen", bus_if(bus), "-I", "2A6", "-L", "64", "-f", "-b", "-g", "2", "-D", "i"])
+    time.sleep(2)
+    for _ in range(kills):
+        t.ssh("slay -s KILL dev-can-ctucanfd")
+        time.sleep(2)
+    load.terminate()
+    load.wait()
+    frames = cd.stop()
+    t.ssh("slay -s TERM ecu-sim; sleep 0.3")
+    sup, ecu = t.out("cat /tmp/sup.log"), t.out("cat /tmp/ecu.log")
+    t.stop_all()
+    seqs = [seq_of(f["data"]) for f in frames]
+    holes = [(b["t"] - a["t"], sa, sb) for a, b, sa, sb in zip(frames, frames[1:], seqs, seqs[1:])
+             if b["t"] - a["t"] > 0.005]
+    check(len(holes) == kills, f"{len(holes)} gaps over 5 ms for {kills} kills: {holes[:6]}")
+    check(all(b > a for a, b in zip(seqs, seqs[1:])), "sequence went backwards")
+    ready = [float(x) for x in re.findall(r"ready \(\S+\) ([\d.]+) ms after spawn", sup)]
+    check(sup.count("died") == kills and len(ready) == kills + 1, f"supervisor log:\n{sup}")
+    reopen = [float(x) for x in re.findall(r"telemetry reopened \S+ after ([\d.]+) ms", ecu)]
+    gaps_ms = ", ".join(f"{g * 1000:.1f}" for g, _, _ in holes)
+    lost = ", ".join(str(b - a - 1) for _, a, b in holes)
+    return (f"{kills} kills under host load: telemetry gaps {gaps_ms} ms (1 ms period; periods lost {lost}); "
+            f"driver ready {', '.join(f'{r:.1f}' for r in ready[1:])} ms after respawn; "
+            f"ecu-sim reopened after {', '.join(f'{r:.1f}' for r in reopen)} ms; {len(frames)} frames")
+
+
+def bus_if(bus):
+    return bus.ifname
+
+
 # ---- tests on the fault-injection build ---------------------------------
 
 FI = "x86_64-fi"
@@ -602,7 +681,7 @@ def t_fi_tx_order_fixed(t, bus):
 TESTS = [v for k, v in sorted(globals().items()) if k.startswith("t_")]
 ORDER = ["tx_lengths", "rx_lengths", "rtr", "ids", "write_path", "extended_mailbox", "readers", "writers",
          "rx_overflow", "bidir", "tx_order", "devctl_sizes", "timing", "spoofed_irq_pulse", "sigterm",
-         "fi_warn", "fi_passive", "fi_busoff_auto", "fi_busoff_manual", "fi_txdelay", "fi_quiesce", "fi_race",
+         "restart_under_load", "fi_warn", "fi_passive", "fi_busoff_auto", "fi_busoff_manual", "fi_txdelay", "fi_quiesce", "fi_race",
          "fi_tx_order", "fi_tx_order_fixed"]
 
 

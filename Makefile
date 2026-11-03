@@ -15,7 +15,7 @@ CFLAGS  += -DCTUCAN_FI
 DRV_SRC += src/ctucanfd_fi.c
 endif
 
-all: $(OUT)/dev-can-ctucanfd $(OUT)/canfd-test $(OUT)/ctucan-probe
+all: $(OUT)/dev-can-ctucanfd $(OUT)/canfd-test $(OUT)/ctucan-probe $(OUT)/ecu-sim $(OUT)/ctucan-supervisor
 
 $(OUT):
 	mkdir -p $@
@@ -25,6 +25,12 @@ $(OUT)/dev-can-ctucanfd: $(DRV_SRC) $(DRV_HDR) | $(OUT)
 	$(CC) $(CFLAGS) -o $@ $(DRV_SRC) -lcan -lpci -lsecpol -lslog2
 
 $(OUT)/canfd-test: tools/canfd-test.c src/ctucanfd_devctl.h | $(OUT)
+	$(CC) $(CFLAGS) -o $@ $<
+
+$(OUT)/ecu-sim: tools/ecu-sim.c | $(OUT)
+	$(CC) $(CFLAGS) -o $@ $<
+
+$(OUT)/ctucan-supervisor: tools/ctucan-supervisor.c | $(OUT)
 	$(CC) $(CFLAGS) -o $@ $<
 
 $(OUT)/ctucan-probe: probe/ctucan_probe.c | $(OUT)
