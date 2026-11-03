@@ -10,7 +10,10 @@ fail() { echo "FAIL: $*"; exit 1; }
 
 # a running binary cannot be overwritten (EBUSY), so stop the old driver first
 $Q "$TGT" ssh "slay -f dev-can-ctucanfd canfd-test >/dev/null 2>&1; sleep 0.3"
-for f in dev-can-ctucanfd canfd-test; do $Q "$TGT" put "$B/$f" /tmp/$f || fail "put $f"; done
+# the old binary stays busy until its process has exited, so retry the copy
+for f in dev-can-ctucanfd canfd-test; do
+    for i in 1 2 3 4 5; do $Q "$TGT" put "$B/$f" /tmp/$f && break; sleep 1; done || fail "put $f"
+done
 $Q "$TGT" ssh "/tmp/dev-can-ctucanfd >/tmp/drv.log 2>&1 </dev/null; cat /tmp/drv.log" || fail "driver start"
 
 echo "== QNX -> host ($IF)"
