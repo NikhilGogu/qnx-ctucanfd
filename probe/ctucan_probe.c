@@ -26,6 +26,7 @@
 #define REG_DEVICE_ID       0x00u   /* [15:0] DEVICE_ID, [23:16] minor, [31:24] major */
 #define REG_MODE            0x04u
 #define REG_STATUS          0x08u
+#define REG_FILTER_CONTROL  0x5cu   /* [15:0] FILTER_CONTROL, [31:16] FILTER_STATUS */
 #define REG_RX_MEM_INFO     0x60u
 #define REG_TX_STATUS       0x70u
 #define REG_YOLO            0x90u
@@ -115,6 +116,10 @@ int main(void)
         printf("core%u MODE=0x%08x STATUS=0x%08x RX_MEM_INFO=0x%08x TX_STATUS=0x%08x YOLO=0x%08x\n",
                c, rd32(core, REG_MODE), rd32(core, REG_STATUS), rd32(core, REG_RX_MEM_INFO),
                rd32(core, REG_TX_STATUS), rd32(core, REG_YOLO));
+        /* FILTER_STATUS bits SFA, SFB, SFC, SFR say which acceptance filters were synthesised */
+        uint32_t fs = rd32(core, REG_FILTER_CONTROL) >> 16;
+        printf("core%u FILTER_STATUS=0x%04x filters present:%s%s%s%s%s\n", c, fs, fs & 1u ? " A" : "",
+               fs & 2u ? " B" : "", fs & 4u ? " C" : "", fs & 8u ? " range" : "", fs & 0xfu ? "" : " none");
     }
 
     pci_device_detach(hdl);
