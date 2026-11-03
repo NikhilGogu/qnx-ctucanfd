@@ -8,6 +8,7 @@
  */
 #include <errno.h>
 #include <inttypes.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -40,10 +41,11 @@ int main(void)
 {
     setvbuf(stdout, NULL, _IONBF, 0);
 
-    /* The x86 PCI hardware module reads config space through I/O ports
-     * 0xCF8/0xCFC with interrupts disabled, so it needs I/O privilege. */
-    if (ThreadCtl(_NTO_TCTL_IO, 0) == -1) {
-        fprintf(stderr, "ThreadCtl(_NTO_TCTL_IO): %s\n", strerror(errno));
+    /* Without I/O privileges the probe died with SIGSEGV during PCI access.
+     * ThreadCtl() (QNX 8.0 library reference): level 1 grants port I/O and
+     * interrupt disable/enable to the calling thread. */
+    if (ThreadCtl(_NTO_TCTL_IO_LEVEL, (void *)(uintptr_t)_NTO_IO_LEVEL_1) == -1) {
+        fprintf(stderr, "ThreadCtl(_NTO_TCTL_IO_LEVEL): %s\n", strerror(errno));
         return 1;
     }
 

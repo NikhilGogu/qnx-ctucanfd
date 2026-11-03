@@ -6,7 +6,7 @@ CFLAGS  += -std=gnu11 -Wall -Wextra -Werror=implicit-function-declaration
 OUT     := build/$(ARCH)
 
 DRV_SRC := src/dev-can-ctucanfd.c src/ctucanfd_hw.c
-DRV_HDR := src/ctucanfd_hw.h src/ctucanfd_regs.h
+DRV_HDR := src/ctucanfd_hw.h src/ctucanfd_regs.h src/ctucanfd_devctl.h
 
 all: $(OUT)/dev-can-ctucanfd $(OUT)/canfd-test $(OUT)/ctucan-probe
 
@@ -17,7 +17,7 @@ $(OUT):
 $(OUT)/dev-can-ctucanfd: $(DRV_SRC) $(DRV_HDR) | $(OUT)
 	$(CC) $(CFLAGS) -o $@ $(DRV_SRC) -lcan -lpci -lsecpol -lslog2
 
-$(OUT)/canfd-test: tools/canfd-test.c | $(OUT)
+$(OUT)/canfd-test: tools/canfd-test.c src/ctucanfd_devctl.h | $(OUT)
 	$(CC) $(CFLAGS) -o $@ $<
 
 $(OUT)/ctucan-probe: probe/ctucan_probe.c | $(OUT)

@@ -15,6 +15,7 @@
 #define CTUCAN_PCI_VENDOR       0x1760u     /* TEDIA */
 #define CTUCAN_PCI_DEVICE       0xff00u     /* CTU CAN FD PCIe board, bridge v2.1 */
 #define CTUCAN_BAR0_ID          0x0000u     /* [3:0] number of cores */
+#define CTUCAN_BAR0_CORES(v)    ((v) & 0xfu)
 #define CTUCAN_CORE_STRIDE      0x4000u     /* core n at BAR1 + n * 0x4000 */
 #define CTUCAN_CORE_SPAN        0x4000u
 
@@ -101,6 +102,15 @@
 #define FS_ERA          (1u << 16)  /* error active */
 #define FS_ERP          (1u << 17)  /* error passive */
 #define FS_BOF          (1u << 18)  /* bus off */
+#define FS_MASK         (FS_ERA | FS_ERP | FS_BOF)
+
+/* REC_TEC */
+#define CNT_REC(v)      ((v) & 0x1ffu)
+#define CNT_TEC(v)      (((v) >> 16) & 0x1ffu)
+
+/* RX_MEM_INFO, in 32-bit words */
+#define RXMI_SIZE(v)    ((v) & 0x1fffu)
+#define RXMI_FREE(v)    (((v) >> 16) & 0x1fffu)
 
 /* RX_STATUS */
 #define RXST_RXE        (1u << 0)
@@ -115,6 +125,7 @@
 #define TXT_ERR         0x6u
 #define TXT_ABT         0x7u
 #define TXT_ETY         0x8u
+#define TXT_PER         0x9u        /* parity error (newer cores) */
 #define TXT_STATE(v, n) (((v) >> ((n) * 4u)) & 0xfu)
 
 /* TX_COMMAND */
@@ -122,6 +133,7 @@
 #define TXC_TXCR        (1u << 1)   /* -> ready */
 #define TXC_TXCA        (1u << 2)   /* -> abort */
 #define TXC_TXB(n)      (1u << (8u + (n)))
+#define TXC_TXB_MASK(m) ((uint32_t)(m) << 8u)   /* m: bit n = TXT buffer n */
 
 /* ERR_CAPT error types */
 #define ERRT_BIT        0u

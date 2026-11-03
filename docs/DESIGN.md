@@ -53,7 +53,7 @@ The CAN DDK (QNX docs: `com.qnx.doc.ddk/topic/can/`) defines a driver as a stand
 - `devctl(CANDEV *, io_devctl_t *)`: called first for every devctl. Return a byte count for data, `EOK`, or -1 with errno; errno `ENOTSUP` hands the command back to libcan's default handling (that is how `CAN_DEVCTL_WRITE_CANMSG_EXT` and `CAN_DEVCTL_READ_CANMSG_EXT` reach the queues).
 - `event_handler(void *hdl, int code)`: called for the interrupt pulse. It returns the `CANDEV` that has news (libcan then replies to blocked readers or refills a TX mailbox) and is called again until it returns NULL.
 
-Queues are libcan's: each `CANDEV` has a `free_queue` and a `msg_queue` of `canmsg_t`, moved with `canmsg_dequeue_element()` and `canmsg_queue_element()`. It links for x86_64 with `-lcan -lpci -lsecpol -lslog2`.
+Queues are libcan's: each `CANDEV` has a `free_queue` and a `msg_queue` of `canmsg_t`, moved with `canmsg_dequeue_element()` and `canmsg_queue_element()`; the DDK's `CANDEV` page says the driver may change only `cflags` and must manipulate the queues through those two functions. The resource manager "is single-threaded, and all callbacks are executed in the same thread" (DDK overview). The driver links for x86_64 with `-lcan -lpci -lsecpol -lslog2`.
 
 Device numbering follows QNX's convention: RX mailboxes first, TX numbered after them. With the defaults that is `/dev/can1/rx0` and `/dev/can1/tx1` for core 0.
 
@@ -70,7 +70,7 @@ Device numbering follows QNX's convention: RX mailboxes first, TX numbered after
 
 ### 2.3 Startup
 
-1. `ThreadCtl(_NTO_TCTL_IO, 0)`. Without it the probe got SIGSEGV during PCI access.
+1. `ThreadCtl(_NTO_TCTL_IO_LEVEL, _NTO_IO_LEVEL_1)`. Without I/O privileges the probe died with SIGSEGV during PCI access. The `ThreadCtl()` entry of the QNX 8.0 library reference describes level 1 as port I/O plus interrupt disable and enable for the calling thread, and recommends `_NTO_TCTL_IO_LEVEL` over the older `_NTO_TCTL_IO`. With it, `pci_device_attach()` and the BAR mappings work on tc (driver start log: `B0:D5:F0 BAR1 0xfeb90000 core 0 of 2, irq 10`).
 2. `pci_device_find(idx, 0x1760, 0xff00)`, `pci_device_attach(..., pci_attachFlags_EXCLUSIVE_OWNER)`, `pci_device_read_ba()`, `pci_device_read_irq()` (gives 10), `mmap_device_memory(PROT_NOCACHE)` of the 16 KiB core window in BAR1.
 3. Check DEVICE_ID 0xCAFD, then soft reset (MODE.RST) so a restarted driver never inherits TX buffers or interrupt state from a dead one.
 4. Bit timing from the core clock (default 100 MHz), 500 kbit/s nominal at 87.5 % sample point and 2 Mbit/s data at 75 %: the driver prints `brp 4 tq 50` and `brp 1 tq 50`.
@@ -80,27 +80,27 @@ Device numbering follows QNX's convention: RX mailboxes first, TX numbered after
 
 The QNX 8.0 migration guide (`com.qnx.doc.qnxsdp.migration/topic/kernel.html`): "Interrupt Service Routines (ISRs) are no longer supported. Instead, QNX has a new mechanism for attaching threads to interrupts: Interrupt Service Threads (ISTs). If you are using events, there is currently no need for you to update your code". `InterruptAttach()` and `InterruptAttachArray()` are listed as removed; `InterruptAttachThread()` is new.
 
-### 3.1 Current path: the libcan thread is the IST
+### 3.1 What runs where
 
-`can_resmgr_attach_intr()` ties the interrupt to a pulse; libcan's pulse handler calls `event_handler()` (CAN DDK docs), which does all device work in thread context:
+The CAN DDK documents the interrupt contract: `can_resmgr_attach_intr()` "associates an IRQ and pulse code with the CAN pulse handler", which calls `event_handler()` when the interrupt occurs; "the interrupt doesn't fire again until it's unmasked"; once the interrupt is fully handled the handler "must call the InterruptUnmask() function and return NULL"; libcan calls `event_handler()` repeatedly until it returns NULL; for a returned TX device it calls `transmit()`, and for a returned RX device it "unblocks the client that was blocked the longest". So all device work runs on libcan's resource-manager thread, which receives the interrupt as a pulse. That thread is not an interrupt service thread. `pidin irq` on tc shows the one attachment: IRQ 10 (`0xa`) delivering a pulse with code 0 to a connection of the driver's process.
 
-1. Read INT_STAT masked by the enabled set. Zero means the shared line was someone else's.
-2. Write the same bits back to INT_STAT first, so events raised while we work stay pending.
-3. RBNEI or DOI: pop frames from RX_DATA until RX_STATUS.RXFRC is zero (budget 512), deliver them, clear an overrun with COMMAND.CDO, clear RBNEI again once the FIFO is empty.
-4. TXBHCI: read TX_STATUS, retire the buffer (TX OK, error or abort), mark TX mailboxes for libcan, start the next queued frame.
-5. EWLI, FCSI, BEI: error accounting (section 8).
-6. Repeat while INT_STAT shows enabled events (up to 16 passes), then return each mailbox with news, one per call.
-7. `InterruptUnmask()`, then read INT_STAT once more (section 3.2).
+### 3.2 Bounded service
 
-No code runs in kernel context, and all callbacks share one thread, so the driver state has no locks.
+Each pulse gets a work budget of 64 units (one per frame moved from the RX FIFO, one per TXT buffer retired) and at most 8 passes over INT_STAT, and each RX mailbox return to libcan counts against a second budget of 64. An interrupt pulse ends with exactly one `InterruptUnmask(0, iid)`, and the result is checked (`unmask_err` in the driver's extended statistics). Work left over is not done in a loop: the driver disables the core's interrupt output (INT_ENA_CLR, which lowers the line because the output is INT_STAT AND INT_ENA; INT_MASK only stops new bits latching, datasheet 2.12 and QEMU's `ctucan_update_irq()`), unmasks the line, and sends itself a continuation pulse. The continuation runs the same bounded service and never unmasks anything. When the work is done the output is enabled again; an event that is still pending then raises the line afresh.
 
-### 3.2 Lost interrupt: found and fixed
+The continuation has its own pulse code. libcan passes a pulse to `event_handler()` only if its code was registered through `can_resmgr_attach_intr()` (stage one: a pulse with an unregistered code was dropped without calling the driver). The driver registers code 1 that way during start-up, with the line masked through the first attachment so the second one cannot fire, and then removes the second attachment's interrupt with `InterruptDetach()`. Afterwards `pidin irq` shows a single attachment and a client pulse with code 1 reaches `event_handler()` (`canfd-test pulse /dev/can1/rx0 1` raised `cont_pulses` from 0 to 1; code 2 was dropped). A process cannot open the pathnames it registered itself (the driver's own `open("/dev/can1/rx0")` failed with ENOENT for 2.4 s while other processes opened it), so the driver finds its channel with `ConnectServerInfo()` over its own connections, accepts it only if every connection to the process itself leads to the same channel, and attaches a side-channel connection for `MsgSendPulse()`. Without a continuation channel, deferred work resumes through the core's own interrupt instead.
 
-The first version unmasked and returned. A 1 ms paced burst stalled it: the driver had 327 of 900 frames while the controller held a full FIFO and a pending, enabled interrupt that never fired (`canctl -d` register dump: `INT_STAT 0x00000409`, `INT_ENA 0x00000c5c`, `RX_STATUS 0x00000660` = 102 frames, `RX_FR_CTR 0x000001ad`). A frame that arrives between the last INT_STAT read and the unmask raises the line while it is masked; on this route no second interrupt comes for a line that is already high. The handler now re-reads INT_STAT after `InterruptUnmask()`; if anything is pending it masks again and services it. Anything later raises a fresh interrupt. Result: `400/400` frames in a 400-frame burst at the same 1 ms pacing, with the re-check catching 6 late events (`late events 6` in the debug dump).
+A pulse sent with code 0 by a client would make the driver unmask an interrupt the kernel did not mask; `InterruptUnmask()` then fails and the driver counts it.
 
-### 3.3 Explicit IST (next step)
+Measured on tc: 300 host frames of 64 bytes in four unpaced bursts of about 90 (above the budget) gave `hw_pulses 4 cont_pulses 3 cont_sent 3 unmask_err 0 deferred 3`, and the reader checked all 300 frames byte for byte (`seqrecv: got 300 of 300, bad 0, missing 0`).
 
-QNX recommends explicit threads "to increase efficiency and control". The plan is an optional IST created with `InterruptAttachThread()` at a priority above client threads. It drains the RX FIFO into a single-producer, single-consumer ring and acknowledges the core, so RX latency no longer depends on how busy the resmgr thread is with client devctls. It then wakes the libcan thread with a pulse. Half of this is checked: a pulse sent with `MsgSendPulse()` on a file descriptor opened to our own `/dev/can1/rx0`, with the interrupt pulse code, reached `event_handler()` (`canfd-test pulse /dev/can1/rx0 0` gave `events 1`), while a pulse with an unregistered code (1) was dropped by libcan without calling the driver. Still to check: that `InterruptDetach()` on the iid from `can_resmgr_attach_intr()` leaves libcan's pulse handler attached, so the IST alone owns the line. The same self-pulse gives a periodic watchdog that re-runs the service loop. We will only switch if measurements (RX latency under client load, overrun at line rate on hardware) show a gain.
+### 3.3 Lost interrupt (stage one) and the output toggle
+
+The stage-one driver stalled under a 1 ms paced burst: the controller held a full FIFO and a pending, enabled interrupt that never fired (`INT_STAT 0x00000409`, `RX_STATUS 0x00000660`). An event that arrived between the last INT_STAT read and the unmask left the line asserted, and no new interrupt came for a line that was already high. Stage one re-read INT_STAT after unmasking and looped. The driver now disables the core's interrupt output before unmasking and enables it afterwards, so a pending event always produces a fresh rising edge after the unmask, whatever the interrupt controller does with a line that is already asserted. `rearm_pending` counts the times an event was pending at that point.
+
+### 3.4 Explicit IST (not in v0.1)
+
+QNX recommends explicit interrupt threads (`InterruptAttachThread()`) "to increase efficiency and control". An explicit IST could drain the RX FIFO into a ring at a priority above client threads, so RX latency would not depend on how busy libcan's thread is. v0.1 does not do this: nothing measured so far shows dispatch contention, and the bounded service above already keeps one interrupt from monopolising that thread.
 
 ## 4. RX path
 

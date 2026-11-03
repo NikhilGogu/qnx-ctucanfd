@@ -42,13 +42,19 @@ int ctucan_hw_identify(const ctucan_hw_t *hw, unsigned *major, unsigned *minor)
     return EOK;
 }
 
-void ctucan_hw_reset(const ctucan_hw_t *hw)
+int ctucan_hw_reset(const ctucan_hw_t *hw)
 {
     ctucan_wr(hw, CTUCAN_MODE, MODE_RST);
-    /* Soft reset is synchronous on the IP core; the YOLO register reads back
-     * its constant once the register bus answers again. */
-    for (int i = 0; i < 10000 && ctucan_rd(hw, CTUCAN_YOLO) != CTUCAN_YOLO_VALUE; i++) {
+    /* The soft reset is synchronous on the IP core; wait until the register
+     * bus answers with reset values again. */
+    for (int i = 0; i < 10000; i++) {
+        if (ctucan_rd(hw, CTUCAN_YOLO) == CTUCAN_YOLO_VALUE &&
+            (ctucan_rd(hw, CTUCAN_DEVICE_ID) & 0xffffu) == CTUCAN_ID_VALUE &&
+            (ctucan_rd(hw, CTUCAN_MODE) & (MODE_RST | SET_ENA)) == 0) {
+            return EOK;
+        }
     }
+    return ETIMEDOUT;
 }
 
 void ctucan_hw_start(const ctucan_hw_t *hw, const ctucan_hw_cfg_t *cfg, uint32_t int_ena)
@@ -56,14 +62,13 @@ void ctucan_hw_start(const ctucan_hw_t *hw, const ctucan_hw_cfg_t *cfg, uint32_t
     uint32_t mode = SET_ENA;
 
     ctucan_wr(hw, CTUCAN_INT_ENA_CLR, INT_ALL);
+    /* Sources the driver does not service never latch in INT_STAT. */
+    ctucan_wr(hw, CTUCAN_INT_MASK_SET, INT_ALL & ~int_ena);
+    ctucan_wr(hw, CTUCAN_INT_MASK_CLR, int_ena);
     ctucan_wr(hw, CTUCAN_INT_STAT, INT_ALL);
     ctucan_wr(hw, CTUCAN_BTR, ctucan_bt_reg(&cfg->nominal));
     ctucan_wr(hw, CTUCAN_BTR_FD, ctucan_bt_reg(&cfg->data));
-    /* TXT buffer n gets priority n + 1. Priority 0 must be avoided: QEMU 6.2
-     * only picks a ready buffer whose priority is above zero. */
-    ctucan_wr(hw, CTUCAN_TX_PRIORITY, 0x4321u);
     ctucan_wr(hw, CTUCAN_COMMAND, CMD_RRB | CMD_CDO | CMD_RXFCRST | CMD_TXFCRST);
-    ctucan_wr(hw, CTUCAN_INT_MASK_CLR, INT_ALL);
 
     if (cfg->fd) {
         mode |= MODE_FDE;
@@ -84,22 +89,33 @@ void ctucan_hw_start(const ctucan_hw_t *hw, const ctucan_hw_cfg_t *cfg, uint32_t
 void ctucan_hw_stop(const ctucan_hw_t *hw)
 {
     ctucan_wr(hw, CTUCAN_INT_ENA_CLR, INT_ALL);
-    ctucan_wr(hw, CTUCAN_MODE, 0);
+    ctucan_wr(hw, CTUCAN_MODE, 0);      /* SETTINGS.ENA = 0: the core leaves the bus */
     ctucan_wr(hw, CTUCAN_INT_STAT, INT_ALL);
 }
 
-int ctucan_hw_tx(const ctucan_hw_t *hw, unsigned buf, const CAN_MSG *msg, bool fdf, bool brs)
+unsigned ctucan_hw_txt_state(const ctucan_hw_t *hw, unsigned buf)
+{
+    return TXT_STATE(ctucan_rd(hw, CTUCAN_TX_STATUS), buf);
+}
+
+/* Fills TXT buffer `buf`; the caller sets it ready with ctucan_hw_txt_cmd(). */
+int ctucan_hw_txt_write(const ctucan_hw_t *hw, unsigned buf, const CAN_MSG *msg, bool fdf, bool brs)
 {
     unsigned len = msg->len;
+    bool rtr = msg->ext.is_remote_frame != 0;
 
-    if (buf >= CTUCAN_TXT_BUFFERS || len > (fdf ? CAN_MSG_DATA_MAX_CANFD : CAN_MSG_DATA_MAX_CAN)) {
-        return EINVAL;
+    if (buf >= CTUCAN_TXT_BUFFERS || len > (fdf ? CAN_MSG_DATA_MAX_CANFD : CAN_MSG_DATA_MAX_CAN) ||
+        (rtr && fdf)) {
+        return EINVAL;  /* CAN FD has no remote frames */
+    }
+    if (!ctucan_txt_writable(ctucan_hw_txt_state(hw, buf))) {
+        return EBUSY;
     }
 
     /* CAN FD lengths are quantised (12, 16, 20, 24, 32, 48, 64): round the
-     * DLC up and pad with zeros. */
+     * DLC up and pad with zeros. A remote frame carries a DLC but no data. */
     unsigned dlc = fdf ? ctucan_len2dlc(len) : len;
-    unsigned words = (ctucan_dlc2len(dlc, fdf) + 3u) / 4u;
+    unsigned words = rtr ? 0 : (ctucan_dlc2len(dlc, fdf) + 3u) / 4u;
     uint32_t ffw = dlc | ((3u + words) << FFW_RWCNT_SHIFT);
     uint32_t idw;
 
@@ -114,8 +130,8 @@ int ctucan_hw_tx(const ctucan_hw_t *hw, unsigned buf, const CAN_MSG *msg, bool f
         if (brs) {
             ffw |= FFW_BRS;
         }
-    } else if (msg->ext.is_remote_frame) {
-        ffw |= FFW_RTR;     /* CAN FD has no remote frames */
+    } else if (rtr) {
+        ffw |= FFW_RTR;
     }
 
     uint32_t tb = CTUCAN_TXTB(buf);
@@ -133,8 +149,26 @@ int ctucan_hw_tx(const ctucan_hw_t *hw, unsigned buf, const CAN_MSG *msg, bool f
         }
         ctucan_wr(hw, tb + FRAME_DATA + 4u * w, v);
     }
-    ctucan_wr(hw, CTUCAN_TX_COMMAND, TXC_TXCR | TXC_TXB(buf));
     return EOK;
+}
+
+void ctucan_hw_txt_cmd(const ctucan_hw_t *hw, uint32_t cmd, unsigned bufmask)
+{
+    ctucan_wr(hw, CTUCAN_TX_COMMAND, cmd | TXC_TXB_MASK(bufmask));
+}
+
+/* The core sends the ready buffer with the highest priority first. Buffer
+ * `oldest` gets the top priority and the next ones in order get lower ones,
+ * so ready buffers leave in FIFO order. QEMU 6.2 never sends a buffer with
+ * priority 0, so priorities run from 7 down. */
+void ctucan_hw_tx_prio(const ctucan_hw_t *hw, unsigned ntxb, unsigned oldest)
+{
+    uint32_t v = 0;
+
+    for (unsigned k = 0; k < ntxb; k++) {
+        v |= (7u - k) << (4u * ((oldest + k) % ntxb));
+    }
+    ctucan_wr(hw, CTUCAN_TX_PRIORITY, v);
 }
 
 unsigned ctucan_hw_rx_frames(const ctucan_hw_t *hw)
@@ -142,29 +176,55 @@ unsigned ctucan_hw_rx_frames(const ctucan_hw_t *hw)
     return RXST_RXFRC(ctucan_rd(hw, CTUCAN_RX_STATUS));
 }
 
+void ctucan_hw_rx_flush(const ctucan_hw_t *hw)
+{
+    ctucan_wr(hw, CTUCAN_COMMAND, CMD_RRB);
+}
+
+/*
+ * Pops one frame. Returns EOK; EBADMSG when the frame was popped whole but its
+ * format word does not match its word count (the frame is dropped); or EIO
+ * when the word count itself cannot be trusted, in which case the caller must
+ * flush the FIFO because frame boundaries are lost.
+ */
 int ctucan_hw_rx(const ctucan_hw_t *hw, CAN_MSG *msg, ctucan_flags_t *fl)
 {
-    uint32_t w[FFW_RWCNT_MASK + 1];
+    uint32_t mi = ctucan_rd(hw, CTUCAN_RX_MEM_INFO);
+    unsigned used = RXMI_SIZE(mi) - RXMI_FREE(mi);
     uint32_t ffw = ctucan_rd(hw, CTUCAN_RX_DATA);
     unsigned rwcnt = (ffw >> FFW_RWCNT_SHIFT) & FFW_RWCNT_MASK;
+    uint32_t w[FFW_RWCNT_MASK + 1];
 
-    /* Always pop the whole frame so the FIFO stays word aligned. */
+    /* identifier + two timestamp words + at most 16 data words, and no more
+     * than the FIFO holds */
+    if (rwcnt < 3 || rwcnt > 3 + 16 || rwcnt + 1 > used) {
+        return EIO;
+    }
     for (unsigned i = 0; i < rwcnt; i++) {
         w[i] = ctucan_rd(hw, CTUCAN_RX_DATA);
-    }
-    if (rwcnt < 3) {
-        return EIO;
     }
 
     bool fdf = (ffw & FFW_FDF) != 0;
     bool rtr = (ffw & FFW_RTR) != 0;
     unsigned len = ctucan_dlc2len(ffw & FFW_DLC_MASK, fdf);
-    unsigned avail = (rwcnt - 3u) * 4u;
+    unsigned dwords = (len + 3u) / 4u;
+    bool ok;
+
+    if (rtr) {
+        /* Silicon stores no data words for a remote frame (RWCNT 3, datasheet);
+         * QEMU 6.2 stores DLC worth of them. CAN FD has no remote frames. */
+        ok = !fdf && (rwcnt == 3 || rwcnt == 3 + dwords);
+    } else {
+        ok = rwcnt == 3 + dwords;
+    }
+    if (!fdf && (ffw & (FFW_BRS | FFW_ESI)) != 0) {
+        ok = false;     /* bit rate switch and ESI exist only in CAN FD frames */
+    }
+    if (!ok) {
+        return EBADMSG;
+    }
 
     memset(msg, 0, sizeof(*msg));
-    if (!rtr && len > avail) {
-        len = avail;
-    }
     msg->len = (uint8_t)len;
     if (ffw & FFW_IDE) {
         msg->mid = w[0] & IDW_EXT_MASK;
@@ -182,6 +242,25 @@ int ctucan_hw_rx(const ctucan_hw_t *hw, CAN_MSG *msg, ctucan_flags_t *fl)
         fl->fdf = fdf;
         fl->brs = (ffw & FFW_BRS) != 0;
         fl->esi = (ffw & FFW_ESI) != 0;
+    }
+    return EOK;
+}
+
+int ctucan_bt_check(const ctucan_bt_t *bt, bool data_phase)
+{
+    const unsigned prop_max = data_phase ? 63u : 127u;
+    const unsigned ph_max = data_phase ? 31u : 63u;
+
+    if (bt->brp < 1 || bt->brp > 255 || bt->prop > prop_max || bt->ph1 > ph_max || bt->ph2 < 1 ||
+        bt->ph2 > ph_max || bt->prop + bt->ph1 < 2u) {
+        return EINVAL;
+    }
+    /* ISO 11898-1: the resynchronisation jump width may not exceed either phase segment. */
+    if (bt->sjw < 1 || bt->sjw > 31 || bt->sjw > bt->ph1 || bt->sjw > bt->ph2) {
+        return EINVAL;
+    }
+    if (1u + bt->prop + bt->ph1 + bt->ph2 < 8u) {
+        return EINVAL;
     }
     return EOK;
 }
@@ -221,12 +300,13 @@ int ctucan_bt_calc(uint32_t clk_hz, uint32_t bitrate, unsigned sp_permille, bool
             if (prop > prop_max) {
                 continue;
             }
+            unsigned sjw = ph1 < ph2 ? ph1 : ph2;
             bt->brp = (uint16_t)brp;
             bt->prop = (uint8_t)prop;
             bt->ph1 = (uint8_t)ph1;
             bt->ph2 = (uint8_t)ph2;
-            bt->sjw = (uint8_t)(ph2 < sjw_max ? ph2 : sjw_max);
-            return EOK;
+            bt->sjw = (uint8_t)(sjw < sjw_max ? sjw : sjw_max);
+            return ctucan_bt_check(bt, data_phase);
         }
     }
     return EINVAL;
