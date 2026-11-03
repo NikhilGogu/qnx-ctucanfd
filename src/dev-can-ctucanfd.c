@@ -71,6 +71,7 @@ struct drv {
     int64_t          ts_delta;
     uint32_t         fault;
     uint32_t         late_events;   /* events caught by the post-unmask re-check */
+    uint32_t         events;        /* event_handler() entries for our pulse code */
     CAN_DEVCTL_STATS stats;
 };
 
@@ -284,8 +285,10 @@ static CANDEV *cb_event(void *const hdl, const int code)
     CANDEV *c;
 
     if (code != PULSE_CODE_IRQ) {
+        can_slogf(SLOG2_WARNING, DRV_NAME ": unexpected pulse code %d", code);
         return NULL;
     }
+    d->events++;
     if (!d->in_event) {
         d->in_event = true;
         service(d);
@@ -359,7 +362,8 @@ static void dump_regs(const drv_t *d)
     for (size_t i = 0; i < sizeof(regs) / sizeof(regs[0]); i++) {
         can_slogf(SLOG2_INFO, DRV_NAME ": %-12s 0x%08x", regs[i].name, ctucan_rd(&d->hw, regs[i].off));
     }
-    can_slogf(SLOG2_INFO, DRV_NAME ": late events %u, tx_busy %d", d->late_events, d->tx_busy);
+    can_slogf(SLOG2_INFO, DRV_NAME ": events %u, late events %u, tx_busy %d", d->events, d->late_events,
+              d->tx_busy);
 }
 
 static int cb_devctl(CANDEV *cdev, io_devctl_t *msg)

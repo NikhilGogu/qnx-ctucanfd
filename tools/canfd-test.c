@@ -8,6 +8,7 @@
  *   canfd-test send DEV ID LEN [HEXDATA]   ID in hex; suffix x = 29-bit id
  *   canfd-test recv DEV [COUNT]
  *   canfd-test info DEV
+ *   canfd-test pulse DEV CODE     send a pulse to the driver's channel
  */
 #include <devctl.h>
 #include <errno.h>
@@ -17,6 +18,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <sys/can_dcmd.h>
+#include <sys/neutrino.h>
 
 static int hexval(int c)
 {
@@ -140,6 +142,10 @@ int main(int argc, char *argv[])
         rc = do_recv(fd, argv[2], argc > 3 ? atoi(argv[3]) : 0);
     } else if (strcmp(argv[1], "info") == 0) {
         rc = do_info(fd);
+    } else if (strcmp(argv[1], "pulse") == 0 && argc > 3) {
+        /* an fd is a connection to the driver's channel, so it carries pulses */
+        rc = MsgSendPulse(fd, -1, atoi(argv[3]), 0) == -1 ? errno : EOK;
+        printf("MsgSendPulse code %d: %s\n", atoi(argv[3]), strerror(rc));
     } else {
         rc = EINVAL;
     }
