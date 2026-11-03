@@ -1,0 +1,44 @@
+# 2026-11-03 16:51:23 UTC target tc, host interface vcan0, commit be3e372
+9: vcan0: <NOARP,UP,LOWER_UP> mtu 72 qdisc noqueue state UNKNOWN mode DEFAULT group default qlen 1000
+QNX noname 8.0.0 2026/06/05-16:26:03EDT x86pc x86_64
+dev-can-ctucanfd: B0:D5:F0 BAR1 0xfeb90000 core 0 of 2, irq 10
+dev-can-ctucanfd: CTU CAN FD 2.2, /dev/can1/rx0..rx0 tx1..tx1, CAN FD, 500000 bit/s (brp 4 tq 50), data 2000000 bit/s (brp 1 tq 50) BRS, 4 TXT buffer(s)
+== QNX -> host (vcan0)
+(1793724684.815903) vcan0 123##5000102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F202122232425262728292A2B2C2D2E2F303132333435363738393A3B3C3D3E3F
+(1793724684.820587) vcan0 7DF#0201050000000000
+== host -> QNX (/dev/can1/rx0)
+/dev/can1/rx0  456  [64]  C0 C1 C2 C3 C4 C5 C6 C7 C8 C9 CA CB CC CD CE CF D0 D1 D2 D3 D4 D5 D6 D7 D8 D9 DA DB DC DD DE DF E0 E1 E2 E3 E4 E5 E6 E7 E8 E9 EA EB EC ED EE EF F0 F1 F2 F3 F4 F5 F6 F7 F8 F9 FA FB FC FD FE FF  ts=1472611615
+/dev/can1/rx0  1ABCDEF0  [04]  DE AD BE EF  ts=1472611844
+== paced burst: 400 sequenced 64-byte CAN FD frames, 1 ms apart, every byte checked
+seqrecv: got 400 of 400, bad 0, missing 0, out_of_order 0, last 399
+stats: tx 2 rx 402 irq 403 (rx 401 tx 2) frame_err 0 hw_overflow 0 swq_full 0 warn 0 passive 0 bus_off 0
+PASS: 64-byte CAN FD both ways, classic and 29-bit ids, 400/400 burst frames checked byte for byte
+PASS tx_lengths: 65 lengths, padding and FD/BRS flags exact (1.7 s)
+PASS rx_lengths: 25 frames (classic 0..8, FD 0..64) exact (3.3 s)
+PASS rtr: RTR dlc 0/4/8 to QNX, dlc 4 to host, RTR len 12 refused (EINVAL) (2.3 s)
+PASS ids: 11-bit 0x000/0x7FF and 29-bit 0x0/0x4000000/0x1FFFFFFF exact both ways (2.9 s)
+PASS write_path: write() -> 100 [3] A1 A2 A3, data frame (2.2 s)
+PASS extended_mailbox: -x write() -> 00000100 extended (2.7 s)
+PASS readers: 4 readers x 50, 200 distinct frames, reports 200 (5.9 s)
+PASS writers: 4 writers x 100 frames, every stream in order (2.4 s)
+PASS rx_overflow: kept seq 36..99, swq_full +36 (2.5 s)
+PASS bidir: 2000 + 2000 frames, both streams complete and in order (6.2 s)
+PASS tx_order: 2000/2000 in order; max in flight 2, 0 multi-buffer TX commands (3.5 s)
+PASS devctl_sizes: SET_MID/2: Invalid argument / WRITE_CANMSG_EXT/40: Invalid argument / SET_TIMING/4: Invalid argument (1.6 s)
+PASS timing: sjw 7 > ph2 refused; brp 4 ts1 43 ts2 6 sjw 4 accepted, 1 restart, TX works after (2.6 s)
+PASS spoofed_irq_pulse: InterruptUnmask refused (unmask_err +1), driver keeps working (1.4 s)
+PASS sigterm: stopped: tx 0 rx 0, pulses hw 0 cont 0, unmask_err 0 (2.8 s)
+PASS restart_under_load: 3 kills under host load: telemetry gaps 7.2, 9.5, 6.8 ms (1 ms period; periods lost 7, 9, 7); driver ready 5.5, 7.3, 5.3 ms after respawn; ecu-sim reopened after 5.9, 8.1, 5.7 ms; 6913 frames (10.8 s)
+PASS ecu_sim: 3031 telemetry frames, CRC and sequence clean; host-side period (QEMU, not bus timing) mean 10.000 ms, sd 0.034, min 9.831, p1 9.908, p99 10.095, max 10.161 ms; 7DF 02 01 5B answered by 7E8 03 41 5B (SOC 80 %) 1.0 ms after cansend; ecu-sim: sent 3048, missed 0 (overruns 0), reopens 0, diagnostic answers 1 (33.4 s)
+PASS fi_warn: ewl_up 1, ewl_down 1, warn 1, FAULT_STATE error active throughout (2.6 s)
+PASS fi_passive: passive 1, back to error active, TX works (2.1 s)
+PASS fi_busoff_auto: 300/300 in order, bus_off 1, recovered 1, largest gap 5.6 ms (1 ms pacing) (2.2 s)
+PASS fi_busoff_manual: 0 frames while bus-off, writer EAGAIN x1281, 100/100 in order after recovery (3.6 s)
+PASS fi_txdelay: 100/100 in order, max in flight 4, seqsend: 100 frame(s) in 194303 us, 174 EAGAIN retries (2.7 s)
+PASS fi_quiesce: 4 frames in flight -> aborted and counted (tx_aborted +4), restart, TX resumes (2.8 s)
+PASS fi_race: 90/90 in order; hw pulses 12, continuations 12, hw_while_cont 11, unmask_err 0 (3.4 s)
+PASS fi_tx_order: 1000/1000 in order across 249 multi-buffer TX commands (3.7 s)
+PASS fi_tx_order_fixed: 996 order breaks in 1000 frames across 498 multi-buffer TX commands (4.4 s)
+PASS fi_rx_corrupt: RWCNT one short: 19 of 20 delivered intact, seq 5 dropped, rejected 1, flushes 1 (0 frames); RWCNT 31: 19 of 20 delivered intact, seq 5 dropped, rejected 0, flushes 1 (1 frames) (5.1 s)
+27 of 27 passed
+# results: build/test-results-20261103T165123Z.txt, exit 0

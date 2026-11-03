@@ -14,7 +14,7 @@ echo "# $(date -u '+%F %T UTC') target $TGT, host interface $IF, commit ${COMMIT
 ip -d link show "$IF" | sed -n 1p
 source ~/qnx800/qnxsdp-env.sh >/dev/null
 make -s -C "$D" && make -s -C "$D" FI=1 || { echo "FAIL: build"; exit 2; }
-~/bin/qtarget "$TGT" ssh "uname -a"
+${QTARGET:-~/bin/qtarget} "$TGT" ssh "uname -a"
 rc=0
 "$D/scripts/gate-test.sh" "$TGT" "$IF" || rc=1
 "$D/scripts/tests/ctutest.py" --target "$TGT" --if "$IF" || rc=1

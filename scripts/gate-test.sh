@@ -5,7 +5,7 @@
 # the host and compares complete frames, not prefixes or line counts.
 set -uo pipefail
 TGT=${1:-tc}; IF=${2:-vcan0}; N=${BURST:-400}
-Q=~/bin/qtarget
+Q=${QTARGET:-~/bin/qtarget}
 B=$(cd "$(dirname "$0")/.." && pwd)/build/x86_64
 fail() { echo "FAIL: $*"; exit 1; }
 

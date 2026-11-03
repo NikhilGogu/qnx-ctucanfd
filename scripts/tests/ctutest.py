@@ -25,7 +25,7 @@ import threading
 import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-QTARGET = os.path.expanduser("~/bin/qtarget")
+QTARGET = os.environ.get("QTARGET", os.path.expanduser("~/bin/qtarget"))
 EFF, RTR = 0x80000000, 0x40000000
 BRS = 0x01
 FD_LENS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 12, 16, 20, 24, 32, 48, 64]
