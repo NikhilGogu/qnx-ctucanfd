@@ -12,13 +12,17 @@ fail() { echo "FAIL: $*"; exit 1; }
 # A running binary cannot be overwritten (EBUSY): stop the old driver (the
 # supervisor first, or it starts it again) and retry while it is exiting.
 $Q "$TGT" ssh "slay -f -s KILL ctucan-supervisor >/dev/null 2>&1; slay -f dev-can-ctucanfd canfd-test >/dev/null 2>&1; true"
+# A copy counts only when the md5 on the target matches the build.
 for f in dev-can-ctucanfd canfd-test; do
-    ok=0
+    want=$(md5sum < "$B/$f" | cut -d' ' -f1); ok=0
     for i in 1 2 3 4 5; do
-        if $Q "$TGT" put "$B/$f" /tmp/$f; then ok=1; break; fi
+        if $Q "$TGT" put "$B/$f" /tmp/$f && [ "$($Q "$TGT" ssh "md5sum /tmp/$f" | cut -d' ' -f1)" = "$want" ]; then
+            ok=1; break
+        fi
         sleep 1
     done
-    [ $ok = 1 ] || fail "copy of $f: retries exhausted"
+    [ $ok = 1 ] || fail "copy of $f: retries exhausted or md5 mismatch"
+    echo "deployed /tmp/$f, md5 $want matches the build"
 done
 OUT=$($Q "$TGT" ssh '/tmp/dev-can-ctucanfd >/tmp/drv.log 2>&1 </dev/null; rc=$?; cat /tmp/drv.log; exit $rc') \
     || fail "driver start: $OUT"

@@ -40,6 +40,7 @@
 #define PASS_LIMIT      8u      /* INT_STAT passes per pulse */
 #define REPORT_BUDGET   64u     /* RX mailbox returns to libcan per pulse */
 #define TX_QUIESCE_MS   20u     /* wait for frames in flight, then as long again after an abort */
+#define STUCK_LIMIT     8u      /* pulses in a row a mailbox may be returned without waking anyone */
 
 #define container_of(p, type, member) ((type *)(void *)((char *)(p) - offsetof(type, member)))
 
@@ -55,6 +56,7 @@ typedef struct {
     uint32_t mfilter;   /* RX: bits of mid that must match (0 = accept all) */
     bool     ext;       /* mid is a 29-bit identifier (-x), never inferred from its bits */
     bool     inited;
+    unsigned stuck;     /* RX: pulses in a row in which a return woke nobody */
 } mbox_t;
 
 /* What the driver keeps about a frame in a TXT buffer. libcan's queue element
@@ -104,7 +106,6 @@ struct drv {
     uint32_t fs;                    /* last FAULT_STATE bits */
     bool     ewl;                   /* last STATUS.EWL, tracked apart from FAULT_STATE */
     bool     busoff_hold;           /* set at bus-off, cleared only by FAULT_STATE = error active */
-    uint64_t abort_deadline;        /* aborted buffers must be final by then (ms) */
 
     int64_t          ts_delta;
     CAN_DEVCTL_STATS stats;
@@ -114,7 +115,7 @@ struct drv {
     mbox_t tx[MAX_TX_DEVS];
 
 #ifdef CTUCAN_FI
-    bool fi_fixedprio;
+    bool fi_fixedprio, fi_nowake;
 #endif
 };
 
@@ -183,8 +184,7 @@ static void tx_kick(drv_t *d)
     while (tx_admit(d) && tx_inflight(d) < d->ntxb) {
         unsigned b = d->txb_head % d->ntxb;
         if (!ctucan_txt_writable(ctucan_hw_txt_state(&d->hw, b))) {
-            d->x.tx_hw_busy++;  /* its state change interrupt brings us back */
-            break;
+            break;  /* its state change interrupt brings us back */
         }
         mbox_t *t;
         canmsg_t *e = tx_dequeue(d, &t);
@@ -204,7 +204,7 @@ static void tx_kick(drv_t *d)
         bool fdf = d->fd && (d->fd_always || m.len > CAN_MSG_DATA_MAX_CAN);
         int rc = ctucan_hw_txt_write(&d->hw, b, &m, fdf, fdf && d->brs);
         if (rc != EOK) {
-            d->x.tx_rejected++;
+            d->x.tx_failed++;   /* refused by the hardware layer (format) */
             can_slogf(SLOG2_ERROR, DRV_NAME ": tx%u: dropped mid 0x%08x len %u%s: %s", t->cdev.dev_unit,
                       m.mid, m.len, m.ext.is_remote_frame ? " RTR" : "", strerror(rc));
             continue;
@@ -348,7 +348,6 @@ static int tx_quiesce(drv_t *d, unsigned ms)
             tx_abort_inflight(d);
         }
     }
-    d->x.tx_quiesce_timeout++;
     tx_force_retire(d);
     return ETIMEDOUT;
 }
@@ -420,6 +419,9 @@ static unsigned rx_drain(drv_t *d, unsigned budget)
 
 /* ---- errors ------------------------------------------------------------ */
 
+/* Bus-off: TX is held and the frames in TXT buffers are aborted. The aborts
+ * are waited for here, at most TX_QUIESCE_MS, and whatever is still not final
+ * then is given up; nothing relies on later traffic or a timer for that. */
 static void enter_busoff(drv_t *d, uint32_t cnt)
 {
     d->stats.bus_off_state_count++;
@@ -427,29 +429,20 @@ static void enter_busoff(drv_t *d, uint32_t cnt)
     can_slogf(SLOG2_WARNING, DRV_NAME ": bus-off (TEC %u REC %u): TX held, %u frame(s) in TXT buffers aborted%s",
               CNT_TEC(cnt), CNT_REC(cnt), tx_inflight(d), d->autobus ? ", recovery requested" : "");
     tx_abort_inflight(d);
-    d->abort_deadline = now_ms() + TX_QUIESCE_MS;
+    uint64_t end = now_ms() + TX_QUIESCE_MS;
+    for (;;) {
+        fi_tick(d);
+        tx_retire(d);
+        if (tx_inflight(d) == 0 || now_ms() >= end) {
+            break;
+        }
+        struct timespec ts = { 0, 200000 };
+        nanosleep(&ts, NULL);
+    }
+    tx_force_retire(d);
     if (d->autobus) {
         ctucan_wr(&d->hw, CTUCAN_COMMAND, CMD_ERCRST);
     }
-}
-
-/* Aborted buffers must reach a final state within TX_QUIESCE_MS of the
- * abort; checked on every service pass while bus-off and before TX resumes. */
-static void busoff_abort_check(drv_t *d, bool resuming)
-{
-    if (tx_inflight(d) == 0 || (!resuming && now_ms() < d->abort_deadline)) {
-        return;
-    }
-    if (resuming) {
-        uint64_t end = d->abort_deadline;
-        while (tx_retire(d), tx_inflight(d) > 0 && now_ms() < end) {
-            struct timespec ts = { 0, 200000 };
-            nanosleep(&ts, NULL);
-        }
-    } else {
-        tx_retire(d);
-    }
-    tx_force_retire(d);
 }
 
 static void error_event(drv_t *d, uint32_t st)
@@ -496,7 +489,6 @@ static void error_event(drv_t *d, uint32_t st)
                       d->busoff_hold ? ", TX still held after bus-off" : "");
         } else if (fs & FS_ERA) {
             if (d->busoff_hold) {
-                busoff_abort_check(d, true);
                 d->busoff_hold = false;
                 d->x.busoff_recovered++;
                 can_slogf(SLOG2_WARNING, DRV_NAME ": bus-off recovery confirmed, TX resumes");
@@ -560,9 +552,6 @@ static void service(drv_t *d)
             tx_retire(d);
             tx_kick(d);     /* also when nothing retired: a busy buffer may have become writable */
         }
-        if (d->busoff_hold) {
-            busoff_abort_check(d, false);
-        }
         if (rx) {
             unsigned n = rx_drain(d, budget);
             d->stats.rx_interrupts++;
@@ -575,15 +564,46 @@ static void service(drv_t *d)
     }
 }
 
-/* libcan wakes one blocked reader per returned RX device, so a mailbox is
- * returned as long as it has both queued frames and blocked readers. */
+/* A mailbox whose returns keep waking nobody: its queued frames are dropped
+ * and counted, so no blocked reader is left behind frames that cannot reach
+ * it and RBNEI is not held for ever. The readers wait for the next frame,
+ * whose pulse returns the mailbox again. */
+static void rx_unstick(drv_t *d, unsigned i)
+{
+    mbox_t *r = &d->rx[i];
+    unsigned n = 0;
+    canmsg_t *e;
+
+    while ((e = canmsg_dequeue_element(r->cdev.msg_queue)) != NULL) {
+        canmsg_queue_element(r->cdev.free_queue, e);
+        n++;
+    }
+    d->x.notify_stuck++;
+    d->x.rx_discarded += n;
+    r->stuck = 0;
+    can_slogf(SLOG2_ERROR, DRV_NAME ": rx%u: %u return(s) in a row woke no reader (%zu blocked); %u queued frame(s) dropped",
+              r->cdev.dev_unit, STUCK_LIMIT, r->cdev.wait_client_queue->cnt, n);
+}
+
+/* libcan wakes a blocked reader per returned RX device (the DDK says the one
+ * blocked longest), so a mailbox is returned as long as it has both queued
+ * frames and blocked readers. */
 static CANDEV *next_report(drv_t *d)
 {
     if (d->last_rep != NULL) {
         CANDEV *c = d->last_rep;
+        unsigned i = (unsigned)(container_of(c, mbox_t, cdev) - d->rx);
         if (c->msg_queue->msgcnt >= d->last_msgcnt && c->wait_client_queue->cnt >= d->last_waitcnt) {
-            /* nobody woke: stop returning this mailbox for this pulse */
-            d->rep_stuck |= 1u << (unsigned)(container_of(c, mbox_t, cdev) - d->rx);
+            /* nobody woke: not again in this pulse, but in the next ones,
+             * up to STUCK_LIMIT pulses in a row */
+            d->rep_stuck |= 1u << i;
+            if (++d->rx[i].stuck < STUCK_LIMIT) {
+                d->notify_left = true;
+            } else {
+                rx_unstick(d, i);
+            }
+        } else {
+            d->rx[i].stuck = 0;
         }
         d->last_rep = NULL;
     }
@@ -630,6 +650,13 @@ static void finish_pulse(drv_t *d)
     if (InterruptUnmask(0, d->iid) == -1 && d->x.unmask_err++ == 0) {
         can_slogf(SLOG2_ERROR, DRV_NAME ": InterruptUnmask: %s", strerror(errno));
     }
+    if (!d->hw_started) {
+        /* A stopped core (failed reset, shutdown) is not serviced, so its
+         * output stays off: pending status must not bring pulse after pulse.
+         * The line itself is unmasked above, as this pulse requires. */
+        d->x.stopped_pulses++;
+        return;
+    }
     if ((ctucan_rd(&d->hw, CTUCAN_INT_STAT) & d->int_ena) != 0) {
         d->x.rearm_pending++;
         if (d->notify_left || ctucan_hw_rx_frames(&d->hw) > 0) {
@@ -659,8 +686,13 @@ static CANDEV *cb_event(void *const hdl, const int code)
         d->rep_stuck = 0;
         d->last_rep = NULL;
     }
-    CANDEV *c = next_report(d);
-    if (c != NULL) {
+    CANDEV *c;
+    while ((c = next_report(d)) != NULL) {
+#ifdef CTUCAN_FI
+        if (d->fi_nowake) {
+            continue;   /* as if libcan had woken nobody */
+        }
+#endif
         return c;
     }
     finish_pulse(d);
@@ -697,9 +729,6 @@ static void fi_devctl_tick(drv_t *d)
         tx_retire(d);
         tx_kick(d);
     }
-    if (d->busoff_hold) {
-        busoff_abort_check(d, false);
-    }
 }
 
 static int fi_request(drv_t *d, const ctucan_fi_req_t *r)
@@ -712,11 +741,13 @@ static int fi_request(drv_t *d, const ctucan_fi_req_t *r)
     d->budget = r->budget != 0 ? r->budget : RX_BUDGET;
     d->report_budget = (r->flags & CTUCAN_FI_F_REPORT1) ? 1 : REPORT_BUDGET;
     d->fi_fixedprio = (r->flags & CTUCAN_FI_F_FIXEDPRIO) != 0;
+    d->fi_nowake = (r->flags & CTUCAN_FI_F_NOWAKE) != 0;
     tx_set_prio(d);
     d->fs = ctucan_rd(&d->hw, CTUCAN_EWL_ERP_FAULT) & FS_MASK;
     d->ewl = (ctucan_rd(&d->hw, CTUCAN_STATUS) & STAT_EWL) != 0;
     can_slogf(SLOG2_INFO, DRV_NAME ": fault injection: scenario %u arg %u/%u budget %u flags 0x%x", r->scenario,
               r->arg, r->arg2, d->budget, r->flags);
+    fi_devctl_tick(d);  /* a scenario that starts at once takes effect without a ticker */
     return EOK;
 }
 #else
@@ -736,6 +767,7 @@ static int restart_controller(drv_t *d)
     d->x.rx_flushed += ctucan_hw_rx_frames(&d->hw);
     ctucan_hw_stop(&d->hw);
     d->hw_started = false;
+    d->suppressed = true;       /* ctucan_hw_stop() cleared INT_ENA */
     int rrc = ctucan_hw_reset(&d->hw);
     if (rrc != EOK) {
         d->x.restart_fail++;
@@ -1174,6 +1206,7 @@ static void teardown(drv_t *d)
     if (d->map != NULL) {
         ctucan_hw_stop(&d->hw);     /* also after a failed restart: leave the core off the bus */
         d->hw_started = false;
+        d->suppressed = true;
     }
     if (d->iid != -1) {
         can_resmgr_detach_intr(d->iid, PULSE_CODE_IRQ);

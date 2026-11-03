@@ -10,6 +10,9 @@
  * supervisor started (ConnectServerInfo() on the connection) and that process
  * answers CAN_DEVCTL_GET_INFO. A path alone is not enough: it appears before
  * the driver has finished starting, and an older driver could still serve it.
+ * The probe runs in a child process that reports through a pipe; the
+ * supervisor waits for it at most 200 ms and then abandons it, so a server
+ * that accepts the open and never replies cannot stall the supervisor.
  * A driver that is not ready within READY_MS (3000) is killed and started
  * again. Every failed start (spawn error, death before ready, timeout) and
  * every restart counts against MAX_RESTARTS (0 = no limit).
@@ -30,6 +33,7 @@
 #include <spawn.h>
 #include <stdarg.h>
 #include <stdbool.h>
+#include <poll.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -73,43 +77,63 @@ static void on_term(int sig)
     g_stop = 1;
 }
 
-static void on_alarm(int sig)
-{
-    (void)sig;  /* only interrupts a blocked open() or devctl() */
-}
-
 static int alive(pid_t pid)
 {
     return kill(pid, 0) == 0 || errno != ESRCH;
 }
 
-/* EOK when `path` is served by `pid` and a devctl on it is answered; the
- * timer bounds both calls in case the server accepts but never replies. */
-static int check_ready(const char *path, pid_t pid, timer_t tm, pid_t *server)
+/* EOK when `path` is served by `pid` and a devctl on it is answered within
+ * `ms`. The open and the devctl run in a child; a child still blocked at the
+ * deadline is killed and not waited for (it may stay reply-blocked until the
+ * server dies, which the supervisor then sees to). */
+static int probe(const char *path, pid_t pid, unsigned ms, pid_t *server)
 {
-    struct itimerspec it = { { 0, 0 }, { 0, 200000000 } };
-    struct itimerspec off = { { 0, 0 }, { 0, 0 } };
-    struct _server_info si;
-    int rc;
+    int fds[2];
+    int32_t res[2] = { ETIMEDOUT, 0 };
 
-    *server = 0;
-    timer_settime(tm, 0, &it, NULL);
-    int fd = open(path, O_RDWR);
-    if (fd == -1) {
-        rc = errno;
-    } else {
-        if (ConnectServerInfo(0, fd, &si) != fd) {
-            rc = errno;
-        } else if ((*server = si.pid) != pid) {
-            rc = ESRCH;
+    if (pipe(fds) == -1) {
+        return errno;
+    }
+    pid_t c = fork();
+    if (c == -1) {
+        res[0] = errno;
+        close(fds[0]);
+        close(fds[1]);
+        return res[0];
+    }
+    if (c == 0) {
+        struct _server_info si;
+        close(fds[0]);
+        res[0] = ENOENT;
+        int fd = open(path, O_RDWR);
+        if (fd == -1) {
+            res[0] = errno;
+        } else if (ConnectServerInfo(0, fd, &si) != fd) {
+            res[0] = errno;
+        } else if ((res[1] = si.pid) != pid) {
+            res[0] = ESRCH;
         } else {
             CAN_DEVCTL_INFO info;
-            rc = devctl(fd, CAN_DEVCTL_GET_INFO, &info, sizeof(info), NULL);
+            res[0] = devctl(fd, CAN_DEVCTL_GET_INFO, &info, sizeof(info), NULL);
         }
-        ConnectDetach(fd);  /* close() would send a message the server might not answer */
+        if (write(fds[1], res, sizeof(res)) != (ssize_t)sizeof(res)) {
+            _exit(1);
+        }
+        _exit(0);
     }
-    timer_settime(tm, 0, &off, NULL);
-    return rc;
+    close(fds[1]);
+    struct pollfd pfd = { fds[0], POLLIN, 0 };
+    if (poll(&pfd, 1, (int)ms) == 1) {
+        if (read(fds[0], res, sizeof(res)) != (ssize_t)sizeof(res)) {
+            res[0] = EIO;
+        }
+    } else {
+        kill(c, SIGKILL);   /* SIGCHLD is ignored, so the kernel reaps it */
+        res[0] = ETIMEDOUT;
+    }
+    close(fds[0]);
+    *server = res[1];
+    return res[0];
 }
 
 int main(int argc, char *argv[])
@@ -140,15 +164,6 @@ int main(int argc, char *argv[])
     sa.sa_handler = on_term;
     sigaction(SIGTERM, &sa, NULL);
     sigaction(SIGINT, &sa, NULL);
-    sa.sa_handler = on_alarm;   /* no SA_RESTART: a blocked call returns EINTR */
-    sigaction(SIGALRM, &sa, NULL);
-    struct sigevent aev;
-    SIGEV_SIGNAL_INIT(&aev, SIGALRM);
-    timer_t tm;
-    if (timer_create(CLOCK_MONOTONIC, &aev, &tm) == -1) {
-        fprintf(stderr, "ctucan-supervisor: timer_create: %s\n", strerror(errno));
-        return 1;
-    }
 
     int chid = ChannelCreate(0);
     int coid = chid == -1 ? -1 : ConnectAttach(0, 0, chid, _NTO_SIDE_CHANNEL, 0);
@@ -181,7 +196,7 @@ int main(int argc, char *argv[])
             pid_t server = 0;
             rc = ENOENT;
             do {    /* at least once, so a child that dies at once still says why */
-                if ((rc = check_ready(ready, pid, tm, &server)) == EOK) {
+                if ((rc = probe(ready, pid, 200, &server)) == EOK) {
                     started = true;
                     break;
                 }

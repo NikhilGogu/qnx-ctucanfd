@@ -100,11 +100,12 @@ enum {
     CTUCAN_FI_WARN,         /* TEC crosses the warning limit and back; FAULT_STATE stays active */
     CTUCAN_FI_PASSIVE,      /* warning, error passive, back to error active */
     CTUCAN_FI_BUSOFF,       /* warning, passive, bus-off; recovers after the driver's ERCRST.
-                             * arg 1: FAULT_STATE reads none, then passive, before active.
+                             * arg bit 0: FAULT_STATE reads none, then passive, before active;
+                             * arg bit 1: bus-off at once.
                              * arg2 1: aborts of held buffers never finish */
     CTUCAN_FI_TXDELAY,      /* TX completions held back: arg ms per frame, arg2 frames */
     CTUCAN_FI_RXCORRUPT,    /* format word of RX frame arg2 altered: arg 1 = RWCNT one short, 2 = RWCNT 31 */
-    CTUCAN_FI_RESETFAIL,    /* the next arg (1) soft resets do not complete */
+    CTUCAN_FI_RESETFAIL,    /* the next arg (1) soft resets never reach the core and time out */
 };
 
 struct ctucan_fi *ctucan_fi_create(void);

@@ -175,6 +175,9 @@ bool ctucan_fi_tick(struct ctucan_fi *fi, uint64_t now_ms)
             }
             break;
         case CTUCAN_FI_BUSOFF:
+            if (fi->step == 0 && (fi->arg & 2)) {
+                fi->step = 2;   /* straight to bus-off */
+            }
             switch (fi->step) {
             case 0: set_err(fi, FS_ERA, EWL_DEFAULT + 1, 0); fi->t_next = now_ms + 2; fi->step = 1; break;
             case 1: set_err(fi, FS_ERP, 128, 0); fi->t_next = now_ms + 2; fi->step = 2; break;
@@ -316,13 +319,14 @@ void ctucan_wr(const ctucan_hw_t *hw, uint32_t off, uint32_t val)
             break;
         case CTUCAN_MODE:
             if (val & MODE_RST) {
-                /* a reset ends every scenario, except a reset meant to fail */
+                /* a reset ends every scenario, except a reset meant to fail:
+                 * that one never reaches the core, which keeps its state */
                 if (fi->reset_fail > 0) {
                     fi->reset_fail--;
                     fi->yolo_bad = true;
-                } else {
-                    fi_clear(fi, fi->now);
+                    return;
                 }
+                fi_clear(fi, fi->now);
             }
             break;
         case CTUCAN_TX_COMMAND:

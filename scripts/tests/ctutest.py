@@ -14,6 +14,7 @@ Tests whose name starts with fi_ run against the fault-injection build
 (make FI=1). Exit status 0 only if every selected test passed.
 """
 import argparse
+import hashlib
 import os
 import re
 import select
@@ -68,13 +69,22 @@ class Target:
     def out(self, cmd, timeout=180):
         return self.ssh(cmd, timeout)[1]
 
+    deployed = {}       # remote path -> md5 verified on the target after the copy
+
     def put(self, local, remote):
+        """Copies and then checks the md5 on the target: a failed or partial copy never leaves an old binary."""
+        want = hashlib.md5(open(local, "rb").read()).hexdigest()
         err = ""
         for _ in range(12):
             p = subprocess.run([QTARGET, self.name, "put", local, remote], capture_output=True, text=True)
             if p.returncode == 0:
-                return
-            err = p.stderr.strip()
+                got = self.out(f"md5sum {remote}").split()
+                if got and got[0] == want:
+                    Target.deployed[remote] = want
+                    return
+                err = f"md5 on the target {got[:1]} differs from {want}"
+            else:
+                err = p.stderr.strip()
             time.sleep(0.5)
         raise Fail(f"put {local}: {err}")
 
@@ -478,7 +488,7 @@ class Candump:
 
 def deploy_tools(t):
     t.stop_all()
-    for f in ("dev-can-ctucanfd", "canfd-test", "ecu-sim", "ctucan-supervisor"):
+    for f in ("dev-can-ctucanfd", "canfd-test", "ecu-sim", "ctucan-supervisor", "ctucan-hangsrv"):
         t.put(os.path.join(ROOT, "build", "x86_64", f), f"/tmp/{f}")
 
 
@@ -536,6 +546,21 @@ def t_supervisor_readiness(t, bus):
     check(out_c.count("spawn /tmp/no-such-driver") == 3 and "restart limit 2 reached" in out_c, out_c)
     return ("never ready: killed after 300 ms x3, then 'restart limit 2 reached'; path served by another "
             "driver: not taken as ready (x2); spawn failure x3 counted against -n 2")
+
+
+def t_supervisor_hang(t, bus):
+    """A server that accepts the open and never answers the devctl: the probe is abandoned at its
+    deadline, the server is killed and started again, and the supervisor stops at -n."""
+    deploy_tools(t)
+    t0 = time.monotonic()
+    out = t.out("/tmp/ctucan-supervisor -n 1 -r 1000 -- /tmp/ctucan-hangsrv; echo exit=$?", timeout=60)
+    dt = time.monotonic() - t0
+    t.ssh("slay -f -s KILL ctucan-hangsrv >/dev/null 2>&1; true")
+    check(out.count("not ready within 1000 ms (Connection timed out), killed") == 2 and
+          "restart limit 1 reached" in out and "exit=1" in out, out)
+    check(dt < 15, f"supervisor took {dt:.1f} s")
+    return (f"server never replies: not ready within 1000 ms (probe timed out) x2, killed each time, "
+            f"'restart limit 1 reached', supervisor done in {dt:.1f} s")
 
 
 def t_ecu_sim(t, bus, seconds=30):
@@ -628,6 +653,76 @@ def t_burst_batches(t, bus):
     check(x["deferred"] > x0["deferred"] and x["unmask_err"] == 0 and between > 0, f"{x} / {mon}")
     return (f"300/300 in order; {x['hw_pulses'] - x0['hw_pulses']} interrupt pulses, "
             f"{x['deferred'] - x0['deferred']} left work for the next, largest batch {x['rx_max_batch']} frames; {mon}")
+
+
+def t_fi_reset_storm(t, bus):
+    """A restart whose reset fails while frames sit in the FIFO and an interrupt is queued: the stopped
+    core's output stays off, the queued pulse is unmasked once, no storm; the next restart works."""
+    t.driver("-q 512", variant=FI, force=True)
+    fi(t, 4, 5000, 4)
+    t.ssh(f"{TEST} seqsend {TX1} 2E8 16 4 0 >/dev/null")
+    fi(t, 6, 1)
+    # 400 ms of host frames, so some arrive while the restart waits for the held frames (an ssh
+    # round trip to start the devctl takes about 100 ms)
+    load = threading.Thread(target=send_burst, args=(bus, 0x2AD, 400), kwargs=dict(paced=0.001))
+    load.start()
+    time.sleep(0.05)
+    out1 = t.out(f"{TEST} timing {RX0} 4 43 6 6")
+    load.join()
+    x1 = t.xstats()
+    time.sleep(1.0)
+    x2 = t.xstats()
+    regs = t.out(f"{TEST} info {RX0}")
+    out2 = t.out(f"{TEST} timing {RX0} 4 43 6 6")
+    bus.drain()
+    t.ssh(f"{TEST} send {TX1} 2EA 8")
+    fr = bus.recv(1, 3, ids={0x2EA})
+    pulses = x2["hw_pulses"] - x1["hw_pulses"]
+    check("timed out" in out1 and x1["restart_fail"] == 1, f"first restart: {out1.strip()} {x1}")
+    check(x1["stopped_pulses"] >= 1, f"no interrupt pulse arrived while stopped: {x1}")
+    check(pulses == 0, f"{pulses} interrupt pulses in 1 s with the core stopped")
+    check("No error" in out2 and len(fr) == 1, f"second restart: {out2.strip()}, host {fr}")
+    return (f"reset failed with RX frames left in the FIFO; {x1['stopped_pulses']} queued pulse(s) unmasked with "
+            f"the output off; 0 pulses in the next second; second restart, TX works")
+
+
+def t_fi_reader_nowake(t, bus):
+    """Returns that wake nobody: retried for 8 pulses, then the mailbox's frames are dropped and counted;
+    bounded pulses, and once wake-ups work again the same reader gets the next frames."""
+    t.driver("-q 256", variant=FI, force=True)
+    fi(t, 0, flags=8)
+    t.bg(f"{TEST} recv {RX0} 3", "/tmp/nw.log")
+    time.sleep(0.5)
+    x0 = t.xstats()
+    send_burst(bus, 0x2AE, 5, length=8, paced=0.01)
+    time.sleep(0.5)
+    x1 = t.xstats()
+    fi(t, 0)
+    send_burst(bus, 0x2AE, 3, length=8, paced=0.01)
+    time.sleep(0.5)
+    got = parse_recv(t.out("cat /tmp/nw.log"))
+    log = t.out("slog2info 2>/dev/null | grep 'woke no reader' | tail -1")
+    pulses = x1["hw_pulses"] - x0["hw_pulses"]
+    stuck = x1["notify_stuck"] - x0["notify_stuck"]
+    check(stuck >= 1 and x1["rx_discarded"] - x0["rx_discarded"] == 5, f"{x1}")
+    check(8 <= pulses <= 8 * 5 + 5, f"{pulses} interrupt pulses for 5 frames")
+    check(len(got) == 3 and "woke no reader" in log, f"after wake-ups resumed: {got}; log {log.strip()}")
+    return (f"5 frames, {stuck} recoveries after 8 fruitless returns each, 5 frames dropped and counted, "
+            f"{pulses} pulses in all; then the blocked reader got the next 3 frames")
+
+
+def t_fi_busoff_abort_notick(t, bus):
+    """Bus-off with aborts that take 100 ms, no FI ticker and no traffic: the 20 ms abort bound holds."""
+    t.driver(variant=FI, force=True)
+    fi(t, 4, 5000, 4)
+    t.ssh(f"{TEST} seqsend {TX1} 2E9 16 4 0 >/dev/null")
+    x0 = t.xstats()
+    t0 = time.monotonic()
+    fi(t, 3, 2, 1)      # bus-off at once, slow aborts, no ticker started
+    x1 = t.xstats()
+    check(x0["inflight"] == 4, f"in flight before bus-off: {x0['inflight']}")
+    check(x1["busoff_hold"] == 1 and x1["inflight"] == 0 and x1["tx_abort_forced"] == 4, f"{x1}")
+    return "4 frames stuck aborting dropped and counted at bus-off within the request (tx_abort_forced 4), hold kept"
 
 
 def t_fi_rejected_normal(t, bus):
@@ -953,10 +1048,12 @@ def t_fi_rx_corrupt(t, bus):
 TESTS = [v for k, v in sorted(globals().items()) if k.startswith("t_")]
 ORDER = ["tx_lengths", "rx_lengths", "rtr", "ids", "write_path", "extended_mailbox", "readers", "writers",
          "rx_overflow", "bidir", "burst_batches", "tx_order", "devctl_sizes", "timing", "spoofed_irq_pulse",
-         "fi_rejected_normal", "sigterm", "restart_under_load", "supervisor_readiness", "ecu_sim", "fi_warn",
+         "fi_rejected_normal", "sigterm", "restart_under_load", "supervisor_readiness", "supervisor_hang",
+         "ecu_sim", "fi_warn",
          "fi_passive", "fi_busoff_auto", "fi_busoff_latch", "fi_busoff_manual", "fi_busoff_stuck_abort",
-         "fi_txdelay", "fi_tx_budget", "fi_quiesce", "fi_reset_retry", "fi_state_clear", "fi_batches",
-         "fi_reader_budget", "fi_tx_order", "fi_tx_order_fixed", "fi_rx_corrupt"]
+         "fi_busoff_abort_notick", "fi_txdelay", "fi_tx_budget", "fi_quiesce", "fi_reset_retry", "fi_reset_storm",
+         "fi_state_clear", "fi_batches", "fi_reader_budget", "fi_reader_nowake", "fi_tx_order", "fi_tx_order_fixed",
+         "fi_rx_corrupt"]
 
 
 def main():
@@ -983,6 +1080,8 @@ def main():
         except (Fail, subprocess.TimeoutExpired) as e:
             failed += 1
             print(f"FAIL {n}: {e} ({time.monotonic() - t0:.1f} s)", flush=True)
+    print(f"deployed files checked by md5 on the target after copying: {len(Target.deployed)} "
+          f"({', '.join(sorted(os.path.basename(k) for k in Target.deployed))})")
     print(f"{len(sel) - failed} of {len(sel)} passed")
     return 1 if failed else 0
 

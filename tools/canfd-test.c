@@ -315,14 +315,15 @@ static int do_xstats(int fd)
         fprintf(stderr, "CTUCAN_DEVCTL_GET_XSTATS: %s\n", strerror(rc));
         return rc;
     }
-    printf("xstats: hw_pulses %u deferred %u unmask_err %u rearm_pending %u spurious %u reports %u "
-           "notify_deferred %u rx_max_batch %u rx_flushes %u rx_flushed %u\n",
-           x.hw_pulses, x.deferred, x.unmask_err, x.rearm_pending, x.spurious, x.reports, x.notify_deferred,
-           x.rx_max_batch, x.rx_flushes, x.rx_flushed);
-    printf("xstats: tx_started %u tx_ok %u tx_failed %u tx_aborted %u tx_lost %u tx_rejected %u tx_hw_busy %u "
-           "tx_order_err %u tx_quiesce_timeout %u tx_max_inflight %u tx_batches %u tx_abort_forced %u\n",
-           x.tx_started, x.tx_ok, x.tx_failed, x.tx_aborted, x.tx_lost, x.tx_rejected, x.tx_hw_busy,
-           x.tx_order_err, x.tx_quiesce_timeout, x.tx_max_inflight, x.tx_batches, x.tx_abort_forced);
+    printf("xstats: hw_pulses %u deferred %u unmask_err %u rearm_pending %u spurious %u stopped_pulses %u "
+           "reports %u notify_deferred %u notify_stuck %u rx_discarded %u rx_max_batch %u rx_flushes %u "
+           "rx_flushed %u\n",
+           x.hw_pulses, x.deferred, x.unmask_err, x.rearm_pending, x.spurious, x.stopped_pulses, x.reports,
+           x.notify_deferred, x.notify_stuck, x.rx_discarded, x.rx_max_batch, x.rx_flushes, x.rx_flushed);
+    printf("xstats: tx_started %u tx_ok %u tx_failed %u tx_aborted %u tx_lost %u tx_order_err %u "
+           "tx_max_inflight %u tx_batches %u tx_abort_forced %u\n",
+           x.tx_started, x.tx_ok, x.tx_failed, x.tx_aborted, x.tx_lost, x.tx_order_err, x.tx_max_inflight,
+           x.tx_batches, x.tx_abort_forced);
     printf("xstats: ewl_up %u ewl_down %u busoff_recovered %u restarts %u restart_fail %u fault_state 0x%x "
            "busoff_hold %u ewl %u inflight %u fi_scenario %u fi_step %u\n",
            x.ewl_up, x.ewl_down, x.busoff_recovered, x.restarts, x.restart_fail, (x.state >> 16) & 7u,
