@@ -25,8 +25,8 @@ Fixed in the code (commit 0b61e01): `qemu-can.sh` stops every QEMU whose working
 
 Text fixed:
 
-1. candump `-x` marks every frame `TX`, not `RX`: on `vcan0` every frame comes from a local program (QEMU's bridge or `cansend`). Outputs and explanation changed.
-2. The kill test gave a largest gap of 20.3 ms, not the "less than 10 ms" of the draft: with a 10 ms period, the frame due while no driver runs is skipped. The text now says 10 or 20 ms, depending on where in the period the kill lands.
+1. The draft showed the frames as `RX`; candump `-x` marks every frame `TX`, because on `vcan0` every frame comes from a local program (QEMU's bridge or `cansend`). Outputs and explanation changed.
+2. The draft gave the kill test's gap as "less than 10 ms"; this pass gave a largest gap of 20.3 ms: with a 10 ms period, the frame due while no driver runs is skipped. The text was changed to 10 or 20 ms, depending on where in the period the kill lands.
 3. Outputs replaced with the real ones of this pass (probe, pidin, candump, statistics, supervisor and ecu-sim logs).
 
 `slay` exits with status 1 after it has killed one process (its documentation: the exit status is the number of processes acted upon). The ERR trap logs those two lines in every pass; a reader sees nothing.
@@ -50,7 +50,7 @@ Every block as written, every Check held. Text fixed: the tester output in step 
 
 ## Pass 5, 4 Nov 00:25:25 to 00:26:26 UTC (61 s)
 
-Every block as written, every Check held. One observation changed the text: `pidin -p ecu-sim` caught thread 1 in `REPLY` (handing a frame to the driver) instead of `NANOSLEEP`. Step 8 now says either can show.
+Every block as written, every Check held. One observation changed the text: `pidin -p ecu-sim` caught thread 1 in `REPLY` (handing a frame to the driver), where the text showed `NANOSLEEP`. Step 8 now says either can show.
 
 ## Pass 6, 4 Nov 00:27:15 to 00:28:13 UTC (58 s)
 
@@ -79,6 +79,6 @@ Every block as written, every Check held but the last: the new check printed bot
 | 10 Second node | 31.3 s | node 2 built, started, driver up; tester `PASS`: 1095 telemetry frames, seq 2644..3738, missing 0, out of order 0, bad CRC 0; period at node 2's driver mean 10.000 ms (9.643 to 10.370); echo 1000 sent, 1000 answered, round trip min 2.855 ms, p50 3.265, p99 3.705, max 3.892; diagnostics 10 of 10, 2.876 to 3.609 ms. Terminal 2 got 2000 frames, all `TX B` and `[64]`; each answer followed its request by 1.454 to 2.320 ms (p50 1.671) |
 | 11 Clean up | 3.0 s | both targets stopped, workspace removed; the check printed nothing |
 
-Verdict: every command ran as written, every Check held, and this pass needed no change to the text. All times are QEMU timing on the build box, not CAN bus timing.
+Verdict: every command ran as written, every Check held, and this pass needed no change to the text. All times are QEMU timing on the build box.
 
-Reading time is not measured by a script. The durations in the text (44 minutes in all) are our estimate for a reader who types the commands and reads the explanations; the machine time of a pass is about one minute.
+The durations in the text (44 minutes in all) are our estimate for a reader who types the commands and reads the explanations; the machine time of a pass is about one minute.

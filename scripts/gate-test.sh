@@ -2,7 +2,7 @@
 # gate-test.sh [target] [host-if]
 # Quick end-to-end check on the build box after `make` and scripts/qemu-can.sh:
 # deploys the driver to a qtarget target, exchanges CAN and CAN FD frames with
-# the host and compares complete frames, not prefixes or line counts.
+# the host and compares complete frames.
 set -uo pipefail
 TGT=${1:-tc}; IF=${2:-vcan0}; N=${BURST:-400}
 Q=${QTARGET:-~/bin/qtarget}

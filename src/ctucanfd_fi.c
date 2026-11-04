@@ -11,9 +11,9 @@
  * and watches the commands it writes (COMMAND.ERCRST, TX_COMMAND, MODE.RST,
  * INT_STAT acks), so the service loop sees the sequences silicon would produce.
  *
- * The overlay changes only what the driver sees. QEMU still sends a frame on
- * the bus the moment its TXT buffer is set ready, so held completions and
- * aborts change the driver's view of a frame, not when it is on the wire.
+ * The overlay changes only what the driver sees: QEMU still sends a frame on
+ * the bus the moment its TXT buffer is set ready, and held completions and
+ * aborts change only the driver's view of it.
  * RXCORRUPT alters the format word of one received frame as the driver pops
  * it. Scenario OFF and a soft reset of the core clear every overlay.
  *

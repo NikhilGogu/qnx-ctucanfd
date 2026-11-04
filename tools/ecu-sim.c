@@ -217,7 +217,7 @@ int main(int argc, char *argv[])
         ts_add_us(&next, g_period_us);
         clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &next, NULL);
 
-        /* Periods that are already over are skipped, not caught up: the
+        /* Periods that are already over are skipped: the
          * sequence counts periods, so the receiver sees what was lost. */
         struct timespec now;
         clock_gettime(CLOCK_MONOTONIC, &now);

@@ -14,7 +14,7 @@ feedback_link: https://github.com/NikhilGogu/qnx-ctucanfd/issues
 ## What you will build
 Duration: 2:00
 
-CAN FD software for QNX usually needs a CAN FD board on your desk. QEMU can emulate one: `ctucan_pci` is a PCI board with the CTU CAN FD IP core, an open source CAN FD controller. In this codelab you boot QNX OS 8.0 in QEMU with that board, run **dev-can-ctucanfd**, a QNX driver for the core built on the QNX CAN Driver Development Kit (libcan), and connect the emulated CAN bus to Linux SocketCAN on your machine, so the usual Linux CAN tools see every frame.
+QEMU can emulate a CAN FD board: `ctucan_pci` is a PCI board with the CTU CAN FD IP core, an open source CAN FD controller. You boot QNX OS 8.0 in QEMU with that board, run **dev-can-ctucanfd**, a QNX driver for the core built on the QNX CAN Driver Development Kit (libcan), and connect the emulated CAN bus to Linux SocketCAN on your machine, so the usual Linux CAN tools see every frame.
 
 ```text
  QNX OS 8.0 in QEMU (node 1)    your Ubuntu machine     QNX OS 8.0 in QEMU (node 2)
@@ -34,7 +34,7 @@ CAN FD software for QNX usually needs a CAN FD board on your desk. QEMU can emul
 
 **What you will learn about QNX:** a CAN driver on QNX is an ordinary process. libcan makes it a resource manager: applications open `/dev/can1/rx0` and `/dev/can1/tx1` and read and write frames with `devctl()`. When the driver dies, the kernel, the applications and your shell keep running, the process manager tells a supervisor, and the supervisor starts the driver again.
 
-Everything in this codelab was run as written on Ubuntu 22.04 with QNX SDP 8.0 and QEMU 6.2. The outputs are from that run, trimmed: long lines end in `...`, and paths in your home directory start with `~`. Your addresses, process ids and times will differ. QEMU models no CAN bit timing, so the times you see are how fast QEMU and QNX move frames on your machine, not how long a frame takes on a real bus.
+The outputs shown are from runs on Ubuntu 22.04 with QNX SDP 8.0 and QEMU 6.2, trimmed: long lines end in `...`, and paths in your home directory start with `~`. Your addresses, process ids and times will differ. QEMU models no CAN bit timing, so the times you see are how fast QEMU and QNX move frames on your machine.
 
 ---
 
@@ -43,7 +43,7 @@ Duration: 4:00
 
 You need:
 
-1. **QNX SDP 8.0 with a free non-commercial licence.** If you do not have one yet, follow the QNX codelab [Get a Free Non-Commercial QNX 8.0 License](https://qnx.github.io/codelabs/get-non-commercial-qnx-license/), then install QNX SDP 8.0 with the QNX Software Center. This codelab assumes it is in `~/qnx800`, so that `~/qnx800/qnxsdp-env.sh` exists.
+1. **QNX SDP 8.0 with a free non-commercial licence.** If you do not have one yet, follow the QNX codelab [Get a Free Non-Commercial QNX 8.0 License](https://qnx.github.io/codelabs/get-non-commercial-qnx-license/), then install QNX SDP 8.0 with the QNX Software Center. The commands assume it is in `~/qnx800`, so that `~/qnx800/qnxsdp-env.sh` exists.
 2. **Ubuntu (22.04 or later, x86_64) with KVM.** Install QEMU, libvirt (mkqnximage targets get their address from libvirt's default network), the Linux CAN tools and the kernel module package that holds `vcan`:
 
     ```bash
@@ -144,7 +144,7 @@ scripts/host-vcan.sh vcan0
     vcan numtxqueues 1 numrxqueues 1 gso_max_size 65536 gso_max_segs 65535
 ```
 
-The script loads the `vcan` module, creates `vcan0`, sets its MTU to 72 and brings it up. 72 bytes is the size of a Linux CAN FD frame structure: QEMU passes CAN FD frames to a host interface only when that interface has this MTU. With the classic CAN MTU of 16, 64-byte frames would never leave QEMU.
+The script loads the `vcan` module, creates `vcan0`, sets its MTU to 72 and brings it up. 72 bytes is the size of a Linux CAN FD frame structure: QEMU passes CAN FD frames to a host interface only when that interface has this MTU.
 
 Check: the first line of the output shows `mtu 72` and `UP`.
 
@@ -232,9 +232,9 @@ rx0
 tx1
 ```
 
-The driver attached to the PCI board, reset core 0, set it up for CAN FD (500 kbit/s nominal, 2 Mbit/s data phase with bit rate switch) and registered two devices: `/dev/can1/rx0` for receiving and `/dev/can1/tx1` for sending. Then it left your shell and kept running in the background, as QNX drivers do. QEMU accepts the bit timing registers but does not model bit timing, so the rates matter only on real hardware.
+The driver attached to the PCI board, reset core 0, set it up for CAN FD (500 kbit/s nominal, 2 Mbit/s data phase with bit rate switch) and registered two devices: `/dev/can1/rx0` for receiving and `/dev/can1/tx1` for sending. Then it left your shell and kept running in the background. QEMU accepts the bit timing registers but does not model bit timing, so the rates matter only on real hardware.
 
-The driver is a process like any other. Look at its threads:
+Look at the driver's threads:
 
 ```bash
 on $NODE1 pidin -p dev-can-ctucanfd
@@ -251,7 +251,7 @@ on $NODE1 pidin -p dev-can-ctucanfd irqs
 		1            0xa    0 ----- =PULSE 0x40000004:-1 0:0
 ```
 
-Thread 1 waits in `RECEIVE`: it runs libcan's resource manager loop and receives the messages that clients send when they call `open()`, `devctl()` or `read()` on `/dev/can1/*`. Thread 2, at priority 254, waits in `INTR` for the CAN core's interrupt. The `irqs` view shows the interrupt the driver attached: vector `0xa` (IRQ 10), delivered as a `PULSE`, a small kernel message, so thread 1 handles frames and client requests one after the other in the same loop. This is the QNX microkernel design: the driver is not part of the kernel, it is a server that other processes send messages to.
+Thread 1 waits in `RECEIVE`: it runs libcan's resource manager loop and receives the messages that clients send when they call `open()`, `devctl()` or `read()` on `/dev/can1/*`. Thread 2, at priority 254, waits in `INTR` for the CAN core's interrupt. The `irqs` view shows the interrupt the driver attached: vector `0xa` (IRQ 10), delivered as a `PULSE`, a small kernel message, so thread 1 handles frames and client requests one after the other in the same loop.
 
 Check: `ls /dev/can1` shows `rx0` and `tx1`.
 
@@ -377,7 +377,7 @@ Check: the deltas between telemetry frames are close to `0.010000`, and `7E8` an
 ## Kill the driver and let the supervisor restart it
 Duration: 5:00
 
-On QNX the driver is a process, so it can crash without taking the system with it. `ctucan-supervisor` starts the driver and starts it again when it dies: it asks the process manager for a notification on every process death (`procmgr_event_notify()`), and it counts the driver as ready only when the driver's own process answers on `/dev/can1/tx1`. Replace the driver you started by hand with a supervised one:
+`ctucan-supervisor` starts the driver and starts it again when it dies: it asks the process manager for a notification on every process death (`procmgr_event_notify()`), and it counts the driver as ready only when the driver's own process answers on `/dev/can1/tx1`. Replace the driver you started by hand with a supervised one:
 
 ```bash
 on $NODE1 slay dev-can-ctucanfd
@@ -392,9 +392,9 @@ dev-can-ctucanfd: CTU CAN FD 2.2, /dev/can1/rx0..rx0 tx1..tx1, CAN FD, ...
 1793742630.252176 ctucan-supervisor: driver pid 1073172 ready (/dev/can1/tx1 answers GET_INFO) 7.5 ms after spawn
 ```
 
-`slay` sent SIGTERM, and the driver stopped cleanly. ecu-sim did not stop: its writes failed, and it tries to open its devices again every millisecond until a driver is back.
+`slay` sent SIGTERM, and the driver stopped cleanly. ecu-sim kept running: its writes failed, and it tries to open its devices again every millisecond until a driver is back.
 
-Now kill the driver the hard way, with SIGKILL, which it cannot catch, while you record the telemetry on Linux:
+Now kill the driver with SIGKILL, which it cannot catch, while you record the telemetry on Linux:
 
 ```bash
 candump -L vcan0,18F:7FF > $LAB/kill.log &
@@ -410,7 +410,7 @@ awk '{ t = substr($1, 2, 17); if (p) { d = (t - p) * 1000; if (d > max) max = d 
 409 frames, largest gap 20.3 ms
 ```
 
-`candump -L` writes one line per frame with an absolute timestamp, and the `awk` script prints the largest time between two frames. The telemetry paused for one period: the frame due while no driver was there was skipped, and the sequence number in bytes 0 to 3 jumps by two. Depending on where in the 10 ms period the kill lands, you see a gap of about 10 or 20 ms. What happened in between:
+`candump -L` writes one line per frame with an absolute timestamp, and the `awk` script prints the largest time between two frames. In this run the telemetry paused for one period: the frame due while no driver was there was skipped, and the sequence number in bytes 0 to 3 jumps by two. What happened in between:
 
 ```bash
 on $NODE1 cat /tmp/sup.log
@@ -430,9 +430,9 @@ ecu-sim: diag rx reopened /dev/can1/rx0 after 7.3 ms
 ecu-sim: telemetry reopened /dev/can1/tx1 after 0.0 ms
 ```
 
-The new driver was ready 5.6 ms after the supervisor started it. The first two ecu-sim lines are from the `slay` before: ecu-sim waited about 137 ms, until the supervisor's first driver was up. After the kill, its receive thread was back 7.3 ms after its first failed read, and its telemetry thread found the new driver at its next send. The kernel freed everything the dead driver held: its memory, its interrupt attachment and its connection to the PCI server. The supervisor started a new driver, which reset the CAN core so that nothing from the dead process was left in it, and ecu-sim's threads found the devices again. Your shell, the SSH sessions and ecu-sim kept running throughout.
+The new driver was ready 5.6 ms after the supervisor started it. The first two ecu-sim lines are from the `slay` before: ecu-sim waited about 137 ms, until the supervisor's first driver was up. After the kill, its receive thread was back 7.3 ms after its first failed read, and its telemetry thread found the new driver at its next send. The kernel freed everything the dead driver held: its memory, its interrupt attachment and its connection to the PCI server. The new driver reset the CAN core when it started. Your shell, the SSH sessions and ecu-sim kept running throughout.
 
-Check: the largest gap is about 10 or 20 ms, and `sup.log` shows `died` followed by `ready`.
+Check: `sup.log` shows `died` followed by `ready`.
 
 ---
 
@@ -459,7 +459,7 @@ dev-can-ctucanfd: B0:D5:F0 BAR1 0xfeb90000 core 0 of 2, irq 10
 dev-can-ctucanfd: CTU CAN FD 2.2, /dev/can1/rx0..rx0 tx1..tx1, CAN FD, ...
 ```
 
-Each QEMU has its own CAN bus with its own bridge to `vcan0`. A frame that node 1 sends goes from its QEMU to `vcan0`, and the Linux kernel passes it to every other program listening on `vcan0`: node 2's QEMU, and candump. This is two QEMU virtual machines joined by your machine's virtual CAN interface, not a physical bus: there is no arbitration, no acknowledgement and no bit timing.
+Each QEMU has its own CAN bus with its own bridge to `vcan0`. A frame that node 1 sends goes from its QEMU to `vcan0`, and the Linux kernel passes it to every other program listening on `vcan0`: node 2's QEMU, and candump. There is no arbitration, acknowledgement or bit timing between the two virtual machines.
 
 In terminal 2, watch the frames between the nodes (the filter `1E0:7F0` lets ids `0x1E0` to `0x1EF` through):
 
@@ -534,12 +534,10 @@ If nothing else on your machine uses `vcan0`, remove it too: `sudo ip link delet
 ## What next
 Duration: 1:00
 
-You ran CAN FD software on QNX OS 8.0 without CAN hardware: a native driver on the CAN DDK, real 64-byte frames to and from Linux tools, a real-time ECU, a driver crash that the system rode out, and two QNX nodes on one bus.
-
 * **The test suite:** `scripts/test-suite.sh` builds the driver and runs the end-to-end tests against a target; with a second target it also runs the two-node test you just did by hand. The README says how to point it at your targets.
 * **Errors and bus-off:** QEMU models no bus errors, so the driver has a fault injection build (`make FI=1`) that plays error and bus-off sequences to it. `docs/DESIGN.md` explains how the driver works and what each test shows.
 * **Your own application:** anything that uses libcan's `devctl()` interface, such as `CAN_DEVCTL_READ_CANMSG_EXT` and `CAN_DEVCTL_WRITE_CANMSG_EXT`, can run against this driver in QEMU first.
-* **Hardware:** the driver has run only in QEMU, not on CTU CAN FD silicon or ARM.
+* **Hardware:** the driver has not run on CTU CAN FD silicon or on ARM.
 * **QNX documentation:** [mkqnximage](https://www.qnx.com/developers/docs/8.0/com.qnx.doc.neutrino.utilities/topic/m/mkqnximage.html), [pidin](https://www.qnx.com/developers/docs/8.0/com.qnx.doc.neutrino.utilities/topic/p/pidin.html), [slay](https://www.qnx.com/developers/docs/8.0/com.qnx.doc.neutrino.utilities/topic/s/slay.html) and [procmgr_event_notify()](https://www.qnx.com/developers/docs/8.0/com.qnx.doc.neutrino.lib_ref/topic/p/procmgr_event_notify.html).
 
 The driver, its design notes and its test logs are at [github.com/NikhilGogu/qnx-ctucanfd](https://github.com/NikhilGogu/qnx-ctucanfd). Report problems with this codelab there.

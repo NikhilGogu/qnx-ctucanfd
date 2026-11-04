@@ -599,7 +599,7 @@ def t_ecu_sim(t, bus, seconds=30):
     mean = sum(d) / n
     sd = (sum((x - mean) ** 2 for x in d) / n) ** 0.5
     p = lambda q: d[min(n - 1, int(q * n))]
-    return (f"{len(tel)} telemetry frames, CRC and sequence clean; host-side period (QEMU, not bus timing) mean "
+    return (f"{len(tel)} telemetry frames, CRC and sequence clean; host-side period (QEMU timing) mean "
             f"{mean:.3f} ms, sd {sd:.3f}, min {d[0]:.3f}, p1 {p(0.01):.3f}, p99 {p(0.99):.3f}, max {d[-1]:.3f} ms; "
             f"7DF 02 01 5B answered by 7E8 03 41 5B (SOC {soc:.0f} %) {(rsp[0]['t'] - t_req) * 1000:.1f} ms after "
             f"cansend; {log.strip().splitlines()[-1]}")
