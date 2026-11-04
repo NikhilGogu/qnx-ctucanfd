@@ -56,7 +56,15 @@ Every block as written, every Check held. One observation changed the text: `pid
 
 Every block as written, every Check held. One sentence was wrong for this pass: step 7 said the statistics show four interrupts, and they showed `irq 3 (rx 1 tx 2)`: the two frames from the host, 0.56 ms apart, came in with one interrupt. The text now gives both readings.
 
-## Pass 7, 4 Nov 00:29:46 to 00:30:46 UTC (60 s): the final text
+## Pass 7, 4 Nov 00:29:46 to 00:30:46 UTC (60 s)
+
+Every block as written, every Check held. Afterwards a list of the QEMU processes on the box showed that a QEMU started by `qemu-can.sh` is daemonised and works in `/`, so the clean-up check, which looked for QEMU by working directory, could not have found a QEMU of this codelab: it held in passes 3 to 7 without testing anything. No QEMU of the passes was left on the box. Fixed: the check now looks for the target directory in QEMU's command line, where `qemu-can.sh` puts the monitor socket's full path; and `qemu-can.sh` now also stops the QEMU in the target's pid file (commit "qemu-can.sh also stops the QEMU in the target's pid file"; a second run on tc2 then printed `stopping QEMU pid 1064146` and started a new one).
+
+## Pass 8, 4 Nov 00:38:45 to 00:39:49 UTC (64 s)
+
+Every block as written, every Check held but the last: the new check printed both QEMUs, 30 ms after `mkqnximage --stop` had returned. The stop does not wait for QEMU to exit. The clean-up now waits 3 seconds before it removes the workspace, and says why.
+
+## Pass 9, 4 Nov 00:40:52 to 00:41:57 UTC (65 s): the final text
 
 | Step | Time | Result |
 |---|---|---|
@@ -66,10 +74,10 @@ Every block as written, every Check held. One sentence was wrong for this pass: 
 | 5 Start a target | 19.5 s | image built; `qemu-can.sh` stopped mkqnximage's QEMU and started the target with the board; `uname` QNX 8.0.0; probe: `DEVICE_ID=0xcafd VERSION=2.2 OK` and `FILTER_STATUS=0x0000 filters present: none` on both cores |
 | 6 Start the driver | 0.6 s | both start lines, and the command returned; `rx0`, `tx1`; two threads (`10r RECEIVE`, `254i INTR`); `irqs` shows vector `0xa` and `PULSE` |
 | 7 First frames | 2.1 s | terminal 2: `123 [64]` with `B`, `321 [8]`, then the host's `456 [16]` with `B` and `1ABCDEF0 [4]`; the reader on QNX printed both host frames byte for byte; `stats: tx 2 rx 2 irq 4 (rx 2 tx 2)` |
-| 8 ECU | 0.8 s | ecu-sim threads at `30f` (`NANOSLEEP`, `REPLY`); five telemetry frames 9.9 to 10.2 ms apart; `7E8 03 41 5B CC` 0.941 ms after `7DF` |
-| 9 Kill and restart | 5.8 s | supervised driver ready 5.6 ms after spawn; after `slay -s KILL`: 414 frames, largest gap 19.8 ms; `died 3.287 s after spawn`, next driver ready 7.4 ms after spawn |
-| 10 Second node | 29.1 s | node 2 built, started, driver up; tester `PASS`: 1094 telemetry frames, seq 2422..3515, missing 0, out of order 0, bad CRC 0; period at node 2's driver mean 10.001 ms (9.507 to 10.515); echo 1000 sent, 1000 answered, round trip min 2.736 ms, p50 3.084, p99 3.551, max 4.706; diagnostics 10 of 10, 2.877 to 3.420 ms. Terminal 2 got 2000 frames, all `TX B` and `[64]`; each answer followed its request by 1.430 to 2.099 ms (p50 1.630) |
-| 11 Clean up | 0.05 s | both targets stopped, workspace removed; the check printed nothing |
+| 8 ECU | 0.9 s | ecu-sim threads at `30f`, both caught in `REPLY`; five telemetry frames 9.9 to 10.1 ms apart; `7E8 03 41 5B CC` 1.041 ms after `7DF` |
+| 9 Kill and restart | 5.9 s | supervised driver ready 5.6 ms after spawn; after `slay -s KILL`: 414 frames, largest gap 19.8 ms; `died 3.298 s after spawn`, next driver ready 6.6 ms after spawn |
+| 10 Second node | 31.3 s | node 2 built, started, driver up; tester `PASS`: 1095 telemetry frames, seq 2644..3738, missing 0, out of order 0, bad CRC 0; period at node 2's driver mean 10.000 ms (9.643 to 10.370); echo 1000 sent, 1000 answered, round trip min 2.855 ms, p50 3.265, p99 3.705, max 3.892; diagnostics 10 of 10, 2.876 to 3.609 ms. Terminal 2 got 2000 frames, all `TX B` and `[64]`; each answer followed its request by 1.454 to 2.320 ms (p50 1.671) |
+| 11 Clean up | 3.0 s | both targets stopped, workspace removed; the check printed nothing |
 
 Verdict: every command ran as written, every Check held, and this pass needed no change to the text. All times are QEMU timing on the build box, not CAN bus timing.
 

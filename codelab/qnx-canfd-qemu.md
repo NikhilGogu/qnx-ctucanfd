@@ -513,17 +513,19 @@ Stop both targets and remove everything this codelab created:
 ```bash
 (cd $NODE2 && mkqnximage --stop)
 (cd $NODE1 && mkqnximage --stop)
+sleep 3
 cd ~ && rm -rf $LAB
 ```
+
+`mkqnximage --stop` asks QEMU to quit and returns at once; the `sleep` gives both QEMUs a moment to exit.
 
 Check: this prints nothing:
 
 ```bash
-for p in $(pgrep qemu-system); do echo "$p $(readlink /proc/$p/cwd)"; done |
-    grep -F -e $NODE1 -e $NODE2
+pgrep -a qemu-system | grep -F -e $NODE1/ -e $NODE2/
 ```
 
-mkqnximage starts QEMU in the target's directory, so the working directory shows which QEMU belongs to this codelab. A line here is a QEMU process from this codelab that is still running (its directory shows as `(deleted)`); end it with `kill` and the process id at the start of the line.
+`qemu-can.sh` gives QEMU the full path of a monitor socket in the target's directory, so the command line shows which QEMU belongs to this codelab. A line here is a QEMU process of this codelab that is still running; end it with `kill` and the process id at the start of the line.
 
 If nothing else on your machine uses `vcan0`, remove it too: `sudo ip link delete vcan0`.
 

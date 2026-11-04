@@ -57,7 +57,7 @@ The driver links statically against `libcan.a` and needs `-lpci -lsecpol -lslog2
 ## Run in QEMU
 
 1. Build a QNX 8.0 x86_64 QEMU image with `mkqnximage`, with ssh access as root, and keep its output next to the target directory, for example `mkdir -p ~/targets/tc && cd ~/targets/tc && mkqnximage --type=qemu --arch=x86_64 --ssh-ident=$HOME/.ssh/id_ed25519.pub --noprompt --run=-h > ~/targets/tc.log`.
-2. Start it with the CAN board: `scripts/qemu-can.sh ~/targets/tc vcan0`. The script stops the QEMU that `mkqnximage --run` started (it may still be starting, so `mkqnximage --stop` can miss it), reuses the exact QEMU command line mkqnximage logged in `~/targets/tc.log` and adds the three options above, a monitor socket and `-daemonize`.
+2. Start it with the CAN board: `scripts/qemu-can.sh ~/targets/tc vcan0`. The script stops any QEMU of that target that still runs (the one `mkqnximage --run` started may still be starting, so `mkqnximage --stop` can miss it), reuses the exact QEMU command line mkqnximage logged in `~/targets/tc.log` and adds the three options above, a monitor socket and `-daemonize`.
 3. Copy the binaries to the target (`scp build/x86_64/* root@<target>:/tmp/`) and start the driver as root:
 
 ```
@@ -149,7 +149,7 @@ Results of the run recorded in `docs/test-results.txt` (commit c9c7745, from a c
 
 ## Codelab
 
-`codelab/qnx-canfd-qemu.md` is a QNX codelab in claat Markdown, about 45 minutes: host vcan, QEMU with `ctucan_pci`, building and starting the driver, first frames, ecu-sim and a diagnostic request, a kill and restart under the supervisor, and two nodes. `codelab/DRYRUN.md` records seven runs of it from the top on the build box; the last one needed no change.
+`codelab/qnx-canfd-qemu.md` is a QNX codelab in claat Markdown, about 45 minutes: host vcan, QEMU with `ctucan_pci`, building and starting the driver, first frames, ecu-sim and a diagnostic request, a kill and restart under the supervisor, and two nodes. `codelab/DRYRUN.md` records nine runs of it from the top on the build box; the last one needed no change.
 
 ## Licence
 
