@@ -6,6 +6,8 @@ Why QNX: a CAN stack in a car or a robot is a safety-relevant service. On QNX th
 
 Status (v0.2.0): tested in QEMU 6.2 with QNX SDP 8.0 on x86_64, also with two QNX nodes on one virtual CAN bus. It compiles and links for aarch64le but has not run on ARM, and it has not run on CTU CAN FD silicon.
 
+Tutorial: the codelab [Test CAN FD software on QNX 8.0 in QEMU, no hardware needed](https://nikhil-qnx-codelabs.pages.dev/qnx-canfd-qemu/) walks through everything below in about 45 minutes (source in [codelab/](codelab/qnx-canfd-qemu.md), dry runs in [codelab/DRYRUN.md](codelab/DRYRUN.md)).
+
 ## What is in the repository
 
 | Path | What |
