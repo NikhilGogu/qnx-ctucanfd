@@ -625,10 +625,10 @@ def t_two_nodes(t, bus, seconds=30):
     bus.drain()
     check(rc == 0 and "tester: PASS" in out, f"tester on {p.name}: {out.strip()}")
     n_tel, s0, s1 = map(int, re.search(r"telemetry 18F: (\d+) frames, seq (\d+)\.\.(\d+)", out).groups())
-    e = re.search(r"echo 1E0->1E8: (\d+) sent, (\d+) answered.*round trip us min (\d+), p50 (\d+), p99 (\d+), "
-                  r"max (\d+), mean (\d+)", out)
-    n_echo = int(e.group(1))
-    n_diag = int(re.search(r"diagnostics 7DF->7E8: (\d+) sent", out).group(1))
+    n_echo = int(re.search(r"echo 1E0->1E8: (\d+) sent", out).group(1))
+    rt = [float(x) for x in re.search(r"round trip ms min ([\d.]+), p50 ([\d.]+), p99 ([\d.]+), max ([\d.]+)",
+                                      out).groups()]
+    n_diag = int(re.search(r"diag 7DF->7E8: (\d+) sent", out).group(1))
     by = lambda i: [f for f in frames if f["id"] == i]
     tel, req, rsp = by(0x18F), by(0x1E0), by(0x1E8)
     # candump -L writes CAN FD flags as one hex digit after "##"; bit 0 is BRS
@@ -649,10 +649,11 @@ def t_two_nodes(t, bus, seconds=30):
     return (f"{t.name} -> {p.name}: {n_tel} telemetry frames (64-byte CAN FD with BRS), seq {s0}..{s1}, CRC and "
             f"sequence clean on {p.name} and on {bus_if(bus)}; {p.name} -> {t.name} -> {p.name}: {n_echo}/{n_echo} "
             f"64-byte echo round trips, every byte checked on {p.name} and on {bus_if(bus)}; QEMU timing: round trip "
-            f"on {p.name}'s clock min {int(e.group(3)) / 1000:.3f} ms, p50 {int(e.group(4)) / 1000:.3f}, p99 "
-            f"{int(e.group(5)) / 1000:.3f}, max {int(e.group(6)) / 1000:.3f}; of that, {t.name} between request and "
+            f"on {p.name}'s clock min {rt[0]:.3f} ms, p50 {rt[1]:.3f}, p99 {rt[2]:.3f}, max {rt[3]:.3f}; of that, "
+            f"{t.name} between request and "
             f"reply on {bus_if(bus)} p50 {q(turn, 0.5):.3f} ms, p99 {q(turn, 0.99):.3f}, max {turn[-1]:.3f}; "
-            f"{n_diag}/{n_diag} diagnostic requests answered; peer: {out.strip().splitlines()[0]}; {elog[-1]}")
+            f"{n_diag}/{n_diag} diagnostic requests answered; peer: "
+            f"{'; '.join(l[8:] for l in out.strip().splitlines() if 'telemetry' in l)}; {elog[-1]}")
 
 
 def crc8(data):

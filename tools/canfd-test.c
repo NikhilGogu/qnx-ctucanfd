@@ -584,23 +584,22 @@ static int do_tester(int rfd, int argc, char *argv[])
     }
     pthread_join(tid, NULL);
     unsigned dn = atomic_load(&g_tx.diag_sent);
-    printf("tester: telemetry 18F: %u frames, seq %u..%u, missing %u, out_of_order %u, bad_crc %u, bad_len %u; "
-           "period at this driver mean %.3f ms, min %.3f, max %.3f\n", tel, first, tel ? expect - 1 : 0, missing,
-           ooo, bad_crc, bad_len, tel > 1 ? (double)d_sum / (tel - 1) / 1000.0 : 0.0,
-           tel > 1 ? d_min / 1000.0 : 0.0, d_max / 1000.0);
+    /* short lines, so they fit a terminal and the codelab */
+    printf("tester: telemetry 18F: %u frames, seq %u..%u\n", tel, first, tel ? expect - 1 : 0);
+    printf("tester: telemetry 18F: missing %u, out_of_order %u, bad_crc %u, bad_len %u\n", missing, ooo, bad_crc,
+           bad_len);
+    printf("tester: telemetry 18F: period at this driver mean %.3f ms, min %.3f, max %.3f\n",
+           tel > 1 ? (double)d_sum / (tel - 1) / 1000.0 : 0.0, tel > 1 ? d_min / 1000.0 : 0.0, d_max / 1000.0);
     qsort(rtt, echo_ok, sizeof(*rtt), cmp_u32);
-    uint64_t r_sum = 0;
-    for (unsigned i = 0; i < echo_ok; i++) {
-        r_sum += rtt[i];
-    }
-#define PCT(q) (echo_ok ? rtt[(unsigned)((uint64_t)(echo_ok - 1) * (q) / 100)] : 0)
-    printf("tester: echo 1E0->1E8: %u sent, %u answered, lost %u, bad %u, duplicate %u; round trip us min %u, "
-           "p50 %u, p99 %u, max %u, mean %.0f\n", g_tx.n, echo_ok, g_tx.n - echo_ok, echo_bad, echo_dup, PCT(0),
-           PCT(50), PCT(99), PCT(100), echo_ok ? (double)r_sum / echo_ok : 0.0);
+#define PCT(q) (echo_ok ? rtt[(unsigned)((uint64_t)(echo_ok - 1) * (q) / 100)] / 1000.0 : 0.0)
+    printf("tester: echo 1E0->1E8: %u sent, %u answered, lost %u, bad %u, duplicate %u\n", g_tx.n, echo_ok,
+           g_tx.n - echo_ok, echo_bad, echo_dup);
+    printf("tester: echo 1E0->1E8: round trip ms min %.3f, p50 %.3f, p99 %.3f, max %.3f\n", PCT(0), PCT(50), PCT(99),
+           PCT(100));
 #undef PCT
-    printf("tester: diagnostics 7DF->7E8: %u sent, %u answered; round trip us min %u, max %u; unexpected %u, "
-           "other %u, tx error %d\n", dn, diag_ok, diag_ok ? diag_min : 0, diag_max, unexpected, other,
-           atomic_load(&g_tx.err));
+    printf("tester: diag 7DF->7E8: %u sent, %u answered, round trip ms min %.3f, max %.3f\n", dn, diag_ok,
+           diag_ok ? diag_min / 1000.0 : 0.0, diag_max / 1000.0);
+    printf("tester: unexpected %u, other %u, tx error %d\n", unexpected, other, atomic_load(&g_tx.err));
     bool ok = tel > 0 && missing == 0 && ooo == 0 && bad_crc == 0 && bad_len == 0 && echo_ok == g_tx.n &&
               echo_bad == 0 && echo_dup == 0 && diag_ok == dn && atomic_load(&g_tx.err) == 0;
     printf("tester: %s\n", ok ? "PASS" : "FAIL");
