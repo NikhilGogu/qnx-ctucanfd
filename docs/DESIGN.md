@@ -2,7 +2,7 @@
 
 `dev-can-ctucanfd` is a native QNX 8.0 CAN driver, built on the CAN DDK (`libcan.a`), for the CTU CAN FD IP core on PCI. QEMU emulates that board as `ctucan_pci`, so CAN and CAN FD software for QNX can run in QEMU with no hardware and talk to host tools over SocketCAN. The only other QEMU CAN path for QNX that we found, dev-can-linux, runs Linux SJA1000 drivers (kvaser_pci), which cannot carry CAN FD.
 
-Every number in this file comes from a command run on the build box (Ubuntu 22.04, QEMU 6.2.0) against a QNX 8.0 x86_64 target built with mkqnximage. Source reading of QEMU's model is marked as such.
+This file describes v0.2.0. Every number in this file comes from a command run on the build box (Ubuntu 22.04, QEMU 6.2.0) against a QNX 8.0 x86_64 target built with mkqnximage. Source reading of QEMU's model is marked as such.
 
 ## 1. The hardware as QEMU 6.2 models it
 
@@ -46,6 +46,7 @@ What the QEMU 6.2 model leaves out or does differently (from reading `hw/net/can
 | Writes narrower than 32 bits are not shifted into place | All register access is 32-bit, 16-bit fields go through their word |
 | Both cores drive one `qemu_irq`; each core raises or lowers it alone | Use one core per board for interrupt-driven nodes; a second node gets a second board |
 | No bus timing: frames from the host land in the FIFO as fast as the host sends | Unpaced bursts overflow the FIFO after 102 frames of 64 bytes |
+| No acceptance filters: the filter registers are neither stored nor read back, `FILTER_STATUS` reads 0 | Software filtering only (section 4.1) |
 
 ## 2. Driver architecture on the CAN DDK
 
@@ -70,12 +71,13 @@ Device numbering follows QNX's convention: RX mailboxes first, TX numbered after
 | `src/ctucanfd_fi.c` | Fault injector for the hardware layer, only in `make FI=1` builds (section 8) |
 | `src/ctucanfd_devctl.h` | Driver-specific devctls and pulse codes, shared with the tools |
 | `src/dev-can-ctucanfd.c` | Options, PCI attach, libcan glue, bounded interrupt service, TX ring, error policy, devctls, shutdown |
-| `tools/canfd-test.c` | Client: send, write, recv, sequenced send/receive, stats, timing, recovery, fault injection and its ticker, devctl monitor, pulses |
-| `tools/ecu-sim.c` | Simulated battery-management ECU (section 10a) |
+| `tools/canfd-test.c` | Client: send, write, recv, sequenced send/receive, stats, timing, recovery, fault injection and its ticker, devctl monitor, pulses, and `tester` for a second node (section 10b) |
+| `tools/ecu-sim.c` | Simulated battery-management ECU with an echo service (sections 10a, 10b) |
 | `tools/ctucan-supervisor.c` | Restarts the driver when it dies (section 9) |
 | `probe/ctucan_probe.c` | Identification probe |
 | `scripts/qemu-can.sh`, `host-vcan.sh` | QEMU launch with CAN, host vcan0 |
 | `scripts/gate-test.sh`, `test-suite.sh`, `tests/ctutest.py` | Quick check, full suite runner, end-to-end tests |
+| `codelab/` | The codelab, its dry-run record and the scripts that ran it |
 
 ### 2.3 Startup
 
@@ -85,7 +87,7 @@ Device numbering follows QNX's convention: RX mailboxes first, TX numbered after
 4. DEVICE_ID must read 0xCAFD; then a soft reset (MODE.RST) that must bring back the reset values within a bounded poll, or the driver exits. A restarted driver therefore never inherits TXT buffers or interrupt state from a dead one.
 5. `can_resmgr_init()`, then `can_resmgr_init_device()` and `can_resmgr_create_device()` for every mailbox, each result checked; any failure unwinds what was set up (interrupts, devices, resource manager, mapping, PCI attach) in reverse order.
 6. `can_resmgr_attach_intr()` for the interrupt, with pulse code 0; the driver attaches nothing else.
-7. Enable the core (SETTINGS.ENA, MODE.FDE) with RBNEI, DOI, TXBHCI, EWLI, FCSI and BEI enabled and every other source masked, set the TXT priorities, then `can_resmgr_start()`.
+7. Enable the core (SETTINGS.ENA, MODE.FDE) with RBNEI, DOI, TXBHCI, EWLI, FCSI and BEI enabled and every other source masked, set the TXT priorities, point stdin, stdout and stderr at `/dev/null`, then `can_resmgr_start()`. The driver leaves its parent once it runs (section 9); before stdio was released, `ssh target /tmp/dev-can-ctucanfd` printed the start lines and never returned, because the running driver held the session's output open. Everything after start-up goes to slog2.
 
 ## 3. Interrupts on QNX 8
 
@@ -93,7 +95,7 @@ The QNX 8.0 migration guide (`com.qnx.doc.qnxsdp.migration/topic/kernel.html`): 
 
 ### 3.1 What runs where
 
-The CAN DDK documents the interrupt contract: `can_resmgr_attach_intr()` "associates an IRQ and pulse code with the CAN pulse handler", which calls `event_handler()` when the interrupt occurs; "the interrupt doesn't fire again until it's unmasked"; once the interrupt is fully handled the handler "must call the InterruptUnmask() function and return NULL"; libcan calls `event_handler()` repeatedly until it returns NULL; for a returned TX device it calls `transmit()`, and for a returned RX device it "unblocks the client that was blocked the longest". So all device work runs on libcan's resource-manager thread, which receives the interrupt as a pulse. That thread is not an interrupt service thread. `pidin irq` on tc shows the one attachment: IRQ 10 (`0xa`) delivering a pulse with code 0 to a connection of the driver's process.
+The CAN DDK documents the interrupt contract: `can_resmgr_attach_intr()` "associates an IRQ and pulse code with the CAN pulse handler", which calls `event_handler()` when the interrupt occurs; "the interrupt doesn't fire again until it's unmasked"; once the interrupt is fully handled the handler "must call the InterruptUnmask() function and return NULL"; libcan calls `event_handler()` repeatedly until it returns NULL; for a returned TX device it calls `transmit()`, and for a returned RX device it "unblocks the client that was blocked the longest". So all device work runs on libcan's resource-manager thread, which receives the interrupt as a pulse. That thread is not an interrupt service thread. `pidin irq` on tc shows the one attachment: IRQ 10 (`0xa`) delivering a pulse with code 0 to a connection of the driver's process. `pidin -p dev-can-ctucanfd` shows two threads: the resource manager thread (`10r RECEIVE`) and a thread at priority 254 in state `INTR`. Our code creates no thread, so that one comes with the interrupt attachment; `pidin -p dev-can-ctucanfd irqs` lists the attachment under it (`0xa`, `=PULSE`).
 
 ### 3.2 Bounded service in interrupt-driven batches
 
@@ -103,8 +105,8 @@ Work that is left over stays visible to the core as a pending interrupt status b
 
 Measured on tc (`docs/test-results.txt`):
 
-- `burst_batches`: 300 host frames of 64 bytes in bursts of 90 (more than one batch): all 300 reached the reader in order in 7 interrupt pulses, 3 of which left work for the next one; largest batch 64 frames. A client issuing `CAN_DEVCTL_GET_STATS` back to back got 758 answers while frames were still coming in, and its longest devctl took 33028 us at this load.
-- `fi_batches`: the same with the batch forced down to 4 frames: 90/90 frames in order in 23 pulses, `unmask_err` 0, 87 devctl answers while frames were coming, longest devctl 2574 us at that load.
+- `burst_batches`: 300 host frames of 64 bytes in bursts of 90 (more than one batch): all 300 reached the reader in order in 7 interrupt pulses, 3 of which left work for the next one; largest batch 64 frames. A client issuing `CAN_DEVCTL_GET_STATS` back to back got 757 answers while frames were still coming in, and its longest devctl took 32533 us at this load.
+- `fi_batches`: the same with the batch forced down to 4 frames: 90/90 frames in order in 23 pulses, `unmask_err` 0, 200 devctl answers while frames were coming, longest devctl 2636 us at that load.
 - `fi_reader_budget`: one mailbox return per pulse and readers blocked on four mailboxes: every reader finished, with 30 pulses holding RBNEI for readers. An earlier version of this test put all four readers on one mailbox: there was one interrupt pulse and one mailbox return, and all four readers got their 10 frames, so one return can wake several readers of a mailbox. The test therefore spreads the readers over four mailboxes, where each return wakes only that mailbox's readers.
 
 These latencies were measured at the loads above; they are not a bound. libcan's thread takes pulses and client messages in priority order (MsgReceive), so a sustained stream of interrupts at a priority above the clients' can still keep a client waiting for longer (section 12).
@@ -130,6 +132,10 @@ The identifier word uses the same layout as a libcan MID (11-bit id in bits 28:1
 Each RX mailbox has a MID, a filter and an identifier format. A frame goes to every mailbox with filter 0, and to a mailbox with a non-zero filter when `((mid ^ mbox.mid) & mbox.mfilter) == 0` and the frame has the mailbox's format (11-bit by default, 29-bit with `-x`). When a mailbox queue is full the oldest frame is dropped (`sw_receive_q_full`). A FIFO overrun clears STATUS.DOR before DOI, as the datasheet requires, and is counted in `hw_receive_overflows`.
 
 An RX mailbox is returned to libcan as long as it has both queued frames and blocked readers (the `msgcnt` and `cnt` fields of its queues in `<hw/libcan.h>`), up to 64 returns per pulse; a mailbox whose counts do not shrink after a return is left alone for that pulse. Returns left over are continued by the next interrupt pulse (section 3.2). A return that wakes nobody (neither count shrinks) keeps the notification pending, so RBNEI stays held, for up to 8 pulses in a row; after that the mailbox's queued frames are dropped, counted (`notify_stuck`, `rx_discarded`) and logged, and RBNEI is released, so neither the readers are left behind frames nor do pulses go on. `fi_reader_nowake` makes every return wake nobody: 5 frames gave 5 such recoveries in 40 pulses, and once wake-ups worked again the same blocked reader got the next 3 frames. With four readers blocked on one mailbox, each of 200 host frames reached exactly one reader and all four finished (`readers` test).
+
+### 4.1 Hardware acceptance filters (not used)
+
+The core can have filters A, B and C (mask and value) and a range filter, programmed through FILTER_A_MASK to FILTER_RAN_HIGH and FILTER_CONTROL, active when MODE.ACF is set; FILTER_STATUS (SFA, SFB, SFC, SFR) says which were synthesised (datasheet 2.7.0, sections 2.10.9 and 3.1.31). QEMU 6.2 does not model them. Source reading of `hw/net/can/ctucan_core.c` at tag v6.2.0 (SHA-256 986550f1...): `ctucan_mem_write()` has cases only for MODE, COMMAND, INT_STAT, INT_ENA_SET/CLR, INT_MASK_SET/CLR, TX_COMMAND and TX_PRIORITY, so filter writes are dropped; `ctucan_mem_read()` has no filter case and returns 0; `ctucan_receive()` stores every frame while the core is enabled, with no MODE.ACF or filter check. The filter fields exist in the state struct only for migration (VMSTATE). On the target, `ctucan-probe` reads `FILTER_STATUS=0x0000 filters present: none` on both cores. So the driver does not program the filters: nothing in QEMU could show that it does so correctly, or that frames are dropped in hardware. Filtering stays in software, per mailbox, as above.
 
 QEMU leaves the timestamp words at zero, so `ext.timestamp` is CLOCK_MONOTONIC in microseconds, adjustable with `CAN_DEVCTL_SET_TIMESTAMP`.
 
@@ -190,7 +196,7 @@ Supervisor: HAM is not in the target image or the SDP's target tree, so `tools/c
 
 Clients: ecu-sim reopens its devices every millisecond while the driver is away (section 10a).
 
-Measured (`restart_under_load`, `docs/test-results.txt`): supervisor, ecu-sim at a 1 ms period on id 0x2F8, host load of 500 frames/s of 64 bytes into QNX, three `slay -s KILL dev-can-ctucanfd` 2 s apart, `candump -L` on the host. Telemetry gaps 9.3, 9.7 and 8.1 ms (10, 10 and 8 periods lost, shown by ecu-sim's sequence number, which counts periods); the driver was ready 5.4, 5.7 and 8.3 ms after the supervisor spawned it; ecu-sim reopened its device 7.5, 7.8 and 6.4 ms after its first failed write.
+Measured (`restart_under_load`, `docs/test-results.txt`): supervisor, ecu-sim at a 1 ms period on id 0x2F8, host load of 500 frames/s of 64 bytes into QNX, three `slay -s KILL dev-can-ctucanfd` 2 s apart, `candump -L` on the host. Telemetry gaps 9.0, 6.5 and 8.4 ms (8, 7 and 8 periods lost, shown by ecu-sim's sequence number, which counts periods); the driver was ready 6.2, 7.8 and 6.4 ms after the supervisor spawned it; ecu-sim reopened its device 6.6, 5.7 and 6.1 ms after its first failed write.
 
 ## 10. Testing in QEMU
 
@@ -198,20 +204,28 @@ Measured (`restart_under_load`, `docs/test-results.txt`): supervisor, ecu-sim at
 scripts/host-vcan.sh vcan0                 # vcan module, mtu 72, link up
 qtarget tc create; qtarget tc stop         # any mkqnximage target (README: plain mkqnximage)
 scripts/qemu-can.sh ~/targets/tc vcan0     # same QEMU args + CAN bus + ctucan_pci + bridge
-scripts/test-suite.sh tc vcan0             # builds both variants, gate test, all of ctutest.py
+scripts/test-suite.sh tc vcan0 tc2         # builds both variants, gate test, all of ctutest.py (tc2: section 10b)
 ```
 
 `qemu-can.sh` takes the exact `QEMU Command:` line mkqnximage logged, swaps `-nographic` for `-display none -daemonize` (QEMU refuses the pair), adds a monitor socket and appends the CAN options. The pidfile stays `output/qemu.pid`, so `qtarget status|ssh|stop` keep working.
 
-`gate-test.sh` is the quick check: one 64-byte CAN FD frame and one classic frame each way, compared complete, and a paced burst of 400 sequenced 64-byte frames checked byte for byte by `canfd-test seqrecv`. `tests/ctutest.py` holds 40 tests (`--list` prints them); the host side uses a raw SocketCAN socket or `candump -L` and checks complete frames and sequence numbers. The last full run, with every result line, is `docs/test-results.txt` (commit 5512fdb, from a clean clone with `QTARGET=scripts/qtarget-lite.sh`: gate test and 40 of 40 tests passed; every copied binary checked by md5 on the target). The README lists what the tests cover.
+`gate-test.sh` is the quick check: one 64-byte CAN FD frame and one classic frame each way, compared complete, and a paced burst of 400 sequenced 64-byte frames checked byte for byte by `canfd-test seqrecv`. `tests/ctutest.py` holds 41 tests (`--list` prints them); the host side uses a raw SocketCAN socket or `candump -L` and checks complete frames and sequence numbers. The last full run, with every result line, is `docs/test-results.txt` (commit c9c7745, from a clean clone with `QTARGET=scripts/qtarget-lite.sh`, targets tc and tc2: gate test and 41 of 41 tests passed; every copied binary checked by md5 on both targets). The README lists what the tests cover.
 
-Not tested: two QNX nodes on one QEMU bus, hardware acceptance filters (not implemented), an unrelated device sharing the interrupt line (the line is not shared on tc; `pidin irq` shows only this driver on IRQ 10), and anything on silicon or ARM.
+Not tested: a physical bus between nodes (section 10b joins two QEMU targets through the host's vcan), hardware acceptance filters (QEMU has none, section 4.1), an unrelated device sharing the interrupt line (the line is not shared on tc; `pidin irq` shows only this driver on IRQ 10), and anything on silicon or ARM.
 
 ## 10a. ecu-sim
 
-`tools/ecu-sim.c` is a small simulated battery-management ECU on QNX. A SCHED_FIFO thread (priority 30) sends one 64-byte CAN FD telemetry frame on id 0x18F every 10 ms with absolute deadlines (`clock_nanosleep(TIMER_ABSTIME)`): sequence number, time since start, pack voltage and current, state of charge and health, highest cell temperature, 16 cell voltages, its reopen count, and a CRC-8 (polynomial 0x1D) over the first 63 bytes. A period that is already over when the thread wakes is skipped and counted, so the sequence number counts periods. A second thread answers one diagnostic request: classic frame `7DF#02015B` (OBD-II service 01, PID 0x5B, battery pack remaining life, SAE J1979) gets `7E8#03415Bxx0000000000` with xx = state of charge * 255 / 100. Both threads reopen their device every millisecond after the driver goes away.
+`tools/ecu-sim.c` is a small simulated battery-management ECU on QNX. A SCHED_FIFO thread (priority 30) sends one 64-byte CAN FD telemetry frame on id 0x18F every 10 ms with absolute deadlines (`clock_nanosleep(TIMER_ABSTIME)`): sequence number, time since start, pack voltage and current, state of charge and health, highest cell temperature, 16 cell voltages, its reopen count, and a CRC-8 (polynomial 0x1D) over the first 63 bytes. A period that is already over when the thread wakes is skipped and counted, so the sequence number counts periods. A second thread answers one diagnostic request: classic frame `7DF#02015B` (OBD-II service 01, PID 0x5B, battery pack remaining life, SAE J1979) gets `7E8#03415Bxx0000000000` with xx = state of charge * 255 / 100. Both threads reopen their device every millisecond after the driver goes away. The second thread also runs an echo service for round-trip tests: a data frame on 0x1E0 goes back unchanged on 0x1E8.
 
-Measured on tc (`ctutest.py ecu_sim`, 30 s, `candump -L vcan0,18F:7FF,7E8:7FF` on the host, `docs/test-results.txt`): 3033 telemetry frames, CRC and sequence clean; inter-frame time mean 10.000 ms, standard deviation 0.050 ms, min 9.429, 1st percentile 9.874, 99th percentile 10.126, max 10.575 ms; ecu-sim reported 0 missed periods. The diagnostic request sent from a raw socket was answered 1.2 ms later (host clock). These are timestamps of QEMU's host bridge on vcan0: they show how the QNX side schedules and how QEMU forwards frames, not CAN bus timing, since QEMU 6.2 models no bit timing.
+Measured on tc (`ctutest.py ecu_sim`, 30 s, `candump -L vcan0,18F:7FF,7E8:7FF` on the host, `docs/test-results.txt`): 3032 telemetry frames, CRC and sequence clean; inter-frame time mean 10.000 ms, standard deviation 0.049 ms, min 9.559, 1st percentile 9.870, 99th percentile 10.131, max 10.437 ms; ecu-sim reported 0 missed periods. The diagnostic request sent from a raw socket was answered 1.1 ms later (host clock). These are timestamps of QEMU's host bridge on vcan0: they show how the QNX side schedules and how QEMU forwards frames, not CAN bus timing, since QEMU 6.2 models no bit timing.
+
+## 10b. Two QNX nodes
+
+A second target with its own `ctucan_pci` board, started by `qemu-can.sh` on the same `vcan0`, is a second node. Each QEMU has its own CAN bus object and its own SocketCAN bridge; the host's vcan delivers each frame to every other socket on the interface, so a frame from node 1 reaches node 2's QEMU and `candump`, and a QEMU does not get its own frames back. This is two QEMU virtual machines joined by the host's virtual CAN interface, not a physical bus: no arbitration, acknowledgement, error signalling or bit timing.
+
+`two_nodes` (`ctutest.py --peer tc2`): the drivers on both targets start with the defaults; ecu-sim runs on tc; `canfd-test tester /dev/can1/rx0 /dev/can1/tx1 30` runs on tc2; `candump -L` on the host records ids 18F, 1E0, 1E8, 7DF and 7E8. The tester checks every telemetry frame (64 bytes, CRC-8, sequence), sends a 64-byte echo request on 0x1E0 every 10 ms and times its reply on 0x1E8 on tc2's clock, so the two guests' clocks need not agree, and sends 7DF#02015B once a second. The host side checks that `vcan0` carried every telemetry period without a hole, that the tester's range is inside it with nothing missing, that every echo request and reply on `vcan0` has the right sequence and all 64 bytes, with BRS, and that ecu-sim's counts match. Measured (`docs/test-results.txt`): 3094 of 3094 telemetry frames, period at tc2's driver mean 10.000 ms (9.368 to 10.644); 3000 of 3000 round trips, min 2.751 ms, median 3.271, 99th percentile 3.681, max 4.162; tc's part, from request to reply on `vcan0`, median 1.700 ms, 99th percentile 1.998, max 2.243; 30 of 30 diagnostic answers. These are QEMU timing on the build box. The other half of the round trip is tc2's own way out and in, through its QEMU bridge, driver and tester; QEMU does not let us split it further.
+
+The codelab (`codelab/qnx-canfd-qemu.md`) walks through the same setup by hand.
 
 ## 11. Demo storyline (under 3 minutes)
 
@@ -228,7 +242,8 @@ Measured on tc (`ctutest.py ecu_sim`, 30 s, `candump -L vcan0,18F:7FF,7E8:7FF` o
 - One active core per board: both cores of QEMU's board drive one interrupt line, and each core raises or lowers it on its own, so two driver instances on one board can lose interrupts. A second node needs a second board.
 - A shared interrupt line is handled in code (a pulse with nothing pending is counted as `spurious` and unmasked) but not tested: on tc only this driver is attached to IRQ 10 (`pidin irq`).
 - Interrupt pulses are not authenticated. Any process allowed to open `/dev/can1/*` can send a pulse with the interrupt code; with nothing masked the kernel refuses the unmask and the driver counts it, but a pulse that arrives while a real interrupt is pending would make the driver unmask early and the real pulse's unmask then fails (counted). The device permissions are the only guard.
-- Software acceptance filtering only; the core's hardware filters are not used.
+- Software acceptance filtering only; the core's hardware filters are not used, because QEMU 6.2 has none to test against (section 4.1).
+- Two nodes are two QEMU targets joined by the host's vcan, not a physical bus (section 10b).
 - Per-frame FDF, BRS and ESI are not reported to clients (section 6).
 - A `SET_TIMING` restart discards frames still in the RX FIFO (counted in `rx_flushed`).
 - Devctl latency is measured, not bounded: a sustained interrupt load at a priority above the clients' can delay them (section 3.2).
@@ -250,7 +265,7 @@ First review, correctness:
 | 7. Startup and shutdown | Fixed: BAR0 core count (`-c 2` refused, checked by hand, section 2.3), every device-creation result checked with unwinding, reset timeout fails start-up and restarts (`fi_reset_retry`), SIGTERM reaches cleanup (`sigterm`), bounded TX quiescence (`fi_quiesce`). Partly: the unwinding of a partial start-up is not exercised by a test. |
 | ARM ordering before claiming ARM support | Open: no ARM runtime claim is made. |
 
-First review, design and scope: the IST description is corrected (section 3.1); one active core per board and untested shared INTx are listed in section 12; fault injection, the supervisor, ecu-sim, four TXT buffers and the aarch64le build are done; two QNX nodes, hardware filters and an explicit IST are not done; `gate-test.sh` no longer hides copy or start failures and compares complete frames.
+First review, design and scope: the IST description is corrected (section 3.1); one active core per board and untested shared INTx are listed in section 12; fault injection, the supervisor, ecu-sim, four TXT buffers and the aarch64le build are done; two QNX nodes are done in v0.2.0 (section 10b); hardware filters are not, since QEMU 6.2 has none (section 4.1); an explicit IST is not done; `gate-test.sh` no longer hides copy or start failures and compares complete frames.
 
 Second review (v0.1), ranked defects:
 

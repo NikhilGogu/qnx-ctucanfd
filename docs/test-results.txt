@@ -1,60 +1,63 @@
-# 2026-11-03 17:30:32 UTC target tc, host interface vcan0, commit 5512fdb
+# 2026-11-04 00:31:25 UTC target tc, peer tc2, host interface vcan0, commit c9c7745
 9: vcan0: <NOARP,UP,LOWER_UP> mtu 72 qdisc noqueue state UNKNOWN mode DEFAULT group default qlen 1000
 QNX noname 8.0.0 2026/06/05-16:26:03EDT x86pc x86_64
-deployed /tmp/dev-can-ctucanfd, md5 0f18ad4e63d369549b2dc55be026cfe8 matches the build
-deployed /tmp/canfd-test, md5 625a6c8c38998156324e778506fbeaf1 matches the build
+QNX noname 8.0.0 2026/06/05-16:26:03EDT x86pc x86_64
+scp: /tmp/dev-can-ctucanfd: Resource busy
+deployed /tmp/dev-can-ctucanfd, md5 575d4f7bbaaf2f856bca4e42a33263d7 matches the build
+deployed /tmp/canfd-test, md5 5ca7e3e5141ca8be408a50442651bc6d matches the build
 dev-can-ctucanfd: B0:D5:F0 BAR1 0xfeb90000 core 0 of 2, irq 10
 dev-can-ctucanfd: CTU CAN FD 2.2, /dev/can1/rx0..rx0 tx1..tx1, CAN FD, 500000 bit/s (brp 4 tq 50), data 2000000 bit/s (brp 1 tq 50) BRS, 4 TXT buffer(s)
 == QNX -> host (vcan0)
-(1793727036.084985) vcan0 123##5000102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F202122232425262728292A2B2C2D2E2F303132333435363738393A3B3C3D3E3F
-(1793727036.089913) vcan0 7DF#0201050000000000
+(1793752289.786329) vcan0 123##5000102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F202122232425262728292A2B2C2D2E2F303132333435363738393A3B3C3D3E3F
+(1793752289.790729) vcan0 7DF#0201050000000000
 == host -> QNX (/dev/can1/rx0)
-/dev/can1/rx0  456  [64]  C0 C1 C2 C3 C4 C5 C6 C7 C8 C9 CA CB CC CD CE CF D0 D1 D2 D3 D4 D5 D6 D7 D8 D9 DA DB DC DD DE DF E0 E1 E2 E3 E4 E5 E6 E7 E8 E9 EA EB EC ED EE EF F0 F1 F2 F3 F4 F5 F6 F7 F8 F9 FA FB FC FD FE FF  ts=3823848887
-/dev/can1/rx0  1ABCDEF0  [04]  DE AD BE EF  ts=3823849041
+/dev/can1/rx0  456  [64]  C0 C1 C2 C3 C4 C5 C6 C7 C8 C9 CA CB CC CD CE CF D0 D1 D2 D3 D4 D5 D6 D7 D8 D9 DA DB DC DD DE DF E0 E1 E2 E3 E4 E5 E6 E7 E8 E9 EA EB EC ED EE EF F0 F1 F2 F3 F4 F5 F6 F7 F8 F9 FA FB FC FD FE FF  ts=3307419162
+/dev/can1/rx0  1ABCDEF0  [04]  DE AD BE EF  ts=3307419319
 == paced burst: 400 sequenced 64-byte CAN FD frames, 1 ms apart, every byte checked
 seqrecv: got 400 of 400, bad 0, missing 0, out_of_order 0, last 399
 stats: tx 2 rx 402 irq 403 (rx 401 tx 2) frame_err 0 hw_overflow 0 swq_full 0 warn 0 passive 0 bus_off 0
 PASS: 64-byte CAN FD both ways, classic and 29-bit ids, 400/400 burst frames checked byte for byte
-PASS tx_lengths: 65 lengths, padding and FD/BRS flags exact (2.7 s)
-PASS rx_lengths: 25 frames (classic 0..8, FD 0..64) exact (2.9 s)
-PASS rtr: RTR dlc 0/4/8 to QNX, dlc 4 to host, RTR len 12 refused (EINVAL) (3.3 s)
+PASS tx_lengths: 65 lengths, padding and FD/BRS flags exact (2.0 s)
+PASS rx_lengths: 25 frames (classic 0..8, FD 0..64) exact (3.6 s)
+PASS rtr: RTR dlc 0/4/8 to QNX, dlc 4 to host, RTR len 12 refused (EINVAL) (3.9 s)
 PASS ids: 11-bit 0x000/0x7FF and 29-bit 0x0/0x4000000/0x1FFFFFFF exact both ways (3.8 s)
 PASS write_path: write() -> 100 [3] A1 A2 A3, data frame (1.2 s)
-PASS extended_mailbox: -x write() -> 00000100 extended (3.9 s)
-PASS readers: 4 readers x 50, 200 distinct frames, reports 200 (6.3 s)
-PASS writers: 4 writers x 100 frames, every stream in order (2.1 s)
-PASS rx_overflow: kept seq 36..99, swq_full +36 (2.8 s)
-PASS bidir: 2000 + 2000 frames, both streams complete and in order (7.2 s)
-PASS burst_batches: 300/300 in order; 7 interrupt pulses, 3 left work for the next, largest batch 64 frames; monitor: 79747 devctls, received 0 -> 300 in 7 steps, 758 answered while frames were still coming, longest 33028 us (5.6 s)
-PASS tx_order: 2000/2000 in order; max in flight 3, 0 multi-buffer TX commands (3.8 s)
+PASS extended_mailbox: -x write() -> 00000100 extended (1.9 s)
+PASS readers: 4 readers x 50, 200 distinct frames, reports 200 (6.1 s)
+PASS writers: 4 writers x 100 frames, every stream in order (2.7 s)
+PASS rx_overflow: kept seq 36..99, swq_full +36 (2.1 s)
+PASS bidir: 2000 + 2000 frames, both streams complete and in order (6.5 s)
+PASS burst_batches: 300/300 in order; 7 interrupt pulses, 3 left work for the next, largest batch 64 frames; monitor: 85759 devctls, received 0 -> 300 in 7 steps, 757 answered while frames were still coming, longest 32533 us (5.6 s)
+PASS tx_order: 2000/2000 in order; max in flight 3, 0 multi-buffer TX commands (3.2 s)
 PASS devctl_sizes: SET_MID/2: Invalid argument / WRITE_CANMSG_EXT/40: Invalid argument / SET_TIMING/4: Invalid argument (2.5 s)
-PASS timing: sjw 7 > ph2 refused; brp 4 ts1 43 ts2 6 sjw 4 accepted, 1 restart, TX works after (2.3 s)
-PASS spoofed_irq_pulse: InterruptUnmask refused (unmask_err +1), driver keeps working (1.7 s)
+PASS timing: sjw 7 > ph2 refused; brp 4 ts1 43 ts2 6 sjw 4 accepted, 1 restart, TX works after (2.2 s)
+PASS spoofed_irq_pulse: InterruptUnmask refused (unmask_err +1), driver keeps working (1.6 s)
 PASS fi_rejected_normal: CTUCAN_DEVCTL_FI and CTUCAN_DEVCTL_FI_TICK -> ENOTTY (1.7 s)
-PASS sigterm: stopped: tx 0 rx 0, pulses 0, unmask_err 0 (3.2 s)
-PASS restart_under_load: 3 kills under host load: telemetry gaps 9.3, 9.7, 8.1 ms (1 ms period; periods lost 10, 10, 8); driver ready 5.4, 5.7, 8.3 ms after respawn; ecu-sim reopened after 7.5, 7.8, 6.4 ms; 6584 frames (11.7 s)
-PASS supervisor_readiness: never ready: killed after 300 ms x3, then 'restart limit 2 reached'; path served by another driver: not taken as ready (x2); spawn failure x3 counted against -n 2 (3.9 s)
-PASS supervisor_hang: server never replies: not ready within 1000 ms (probe timed out) x2, killed each time, 'restart limit 1 reached', supervisor done in 2.3 s (4.1 s)
-PASS ecu_sim: 3033 telemetry frames, CRC and sequence clean; host-side period (QEMU, not bus timing) mean 10.000 ms, sd 0.050, min 9.429, p1 9.874, p99 10.126, max 10.575 ms; 7DF 02 01 5B answered by 7E8 03 41 5B (SOC 80 %) 1.2 ms after cansend; ecu-sim: sent 3048, missed 0 (overruns 0), reopens 0, diagnostic answers 1 (34.1 s)
-PASS fi_warn: ewl_up 1, ewl_down 1, warn 1, FAULT_STATE error active throughout (3.3 s)
+PASS sigterm: stopped: tx 0 rx 0, pulses 0, unmask_err 0 (3.7 s)
+PASS restart_under_load: 3 kills under host load: telemetry gaps 9.0, 6.5, 8.4 ms (1 ms period; periods lost 8, 7, 8); driver ready 6.2, 7.8, 6.4 ms after respawn; ecu-sim reopened after 6.6, 5.7, 6.1 ms; 6477 frames (11.6 s)
+PASS supervisor_readiness: never ready: killed after 300 ms x3, then 'restart limit 2 reached'; path served by another driver: not taken as ready (x2); spawn failure x3 counted against -n 2 (4.4 s)
+PASS supervisor_hang: server never replies: not ready within 1000 ms (probe timed out) x2, killed each time, 'restart limit 1 reached', supervisor done in 2.2 s (4.6 s)
+PASS ecu_sim: 3032 telemetry frames, CRC and sequence clean; host-side period (QEMU, not bus timing) mean 10.000 ms, sd 0.049, min 9.559, p1 9.870, p99 10.131, max 10.437 ms; 7DF 02 01 5B answered by 7E8 03 41 5B (SOC 80 %) 1.1 ms after cansend; ecu-sim: sent 3048, missed 0 (overruns 0), reopens 0, diagnostic answers 1, echoes 0 (34.0 s)
+PASS two_nodes: tc -> tc2: 3094 telemetry frames (64-byte CAN FD with BRS), seq 0..3093, CRC and sequence clean on tc2 and on vcan0; tc2 -> tc -> tc2: 3000/3000 64-byte echo round trips, every byte checked on tc2 and on vcan0; QEMU timing: round trip on tc2's clock min 2.751 ms, p50 3.271, p99 3.681, max 4.162; of that, tc between request and reply on vcan0 p50 1.700 ms, p99 1.998, max 2.243; 30/30 diagnostic requests answered; peer: telemetry 18F: 3094 frames, seq 0..3093; telemetry 18F: missing 0, out_of_order 0, bad_crc 0, bad_len 0; telemetry 18F: period at this driver mean 10.000 ms, min 9.368, max 10.644; ecu-sim: sent 3141, missed 0 (overruns 0), reopens 0, diagnostic answers 30, echoes 3000 (38.2 s)
+PASS fi_warn: ewl_up 1, ewl_down 1, warn 1, FAULT_STATE error active throughout (2.6 s)
 PASS fi_passive: passive 1, back to error active, TX works (2.8 s)
-PASS fi_busoff_auto: 300/300 in order, bus_off 1, recovered 1, largest gap 5.3 ms (1 ms pacing) (2.5 s)
-PASS fi_busoff_latch: hold still set 60 ms in (FAULT_STATE 2); 200/200 in order; largest gap 108.1 ms against 2 ms pacing (2.4 s)
-PASS fi_busoff_manual: 0 frames while bus-off, writer EAGAIN x1287, 100/100 in order after recovery (4.7 s)
-PASS fi_busoff_stuck_abort: 4 frames stuck aborting -> dropped and counted at the bound (tx_abort_forced 4), recovery, TX resumes (3.1 s)
-PASS fi_busoff_abort_notick: 4 frames stuck aborting dropped and counted at bus-off within the request (tx_abort_forced 4), hold kept (1.7 s)
-PASS fi_txdelay: 100/100 in order, max in flight 4, seqsend: 100 frame(s) in 194688 us, 179 EAGAIN retries (3.2 s)
-PASS fi_tx_budget: 300 TX + 300 RX complete and in order with 1 RX frame per pulse; tx_ok 300, 74 multi-buffer TX commands, 323 pulses (4.1 s)
-PASS fi_quiesce: 4 frames in flight -> aborted and counted (tx_aborted +4), restart, TX resumes (2.5 s)
-PASS fi_reset_retry: reset timeout -> ETIMEDOUT, core stopped, nothing sent; second restart -> queued frame sent, RX works (5.0 s)
-PASS fi_reset_storm: reset failed with RX frames left in the FIFO; 1 queued pulse(s) unmasked with the output off; 0 pulses in the next second; second restart, TX works (4.2 s)
-PASS fi_state_clear: OFF: 10/10 frames, no flush; bus-off then restart: overlay and hold gone, TX works (4.8 s)
-PASS fi_batches: 90/90 in order in 23 interrupt pulses of at most 4 frames, unmask_err 0; monitor: 64360 devctls, received 0 -> 90 in 23 steps, 87 answered while frames were still coming, longest 2574 us (4.6 s)
-PASS fi_reader_budget: 4 mailboxes x 10 frames, every reader finished; 30 pulses held RBNEI for readers, 40 mailbox returns (7.3 s)
-PASS fi_reader_nowake: 5 frames, 5 recoveries after 8 fruitless returns each, 5 frames dropped and counted, 40 pulses in all; then the blocked reader got the next 3 frames (5.0 s)
-PASS fi_tx_order: 1000/1000 in order across 249 multi-buffer TX commands (4.8 s)
-PASS fi_tx_order_fixed: 996 order breaks in 1000 frames across 498 multi-buffer TX commands (3.5 s)
-PASS fi_rx_corrupt: RWCNT one short, frames back to back: 5 delivered intact, 15 flushed, 1 flush, none fabricated; RWCNT 31, paced: 19 delivered intact, 1 flushed, 1 flush, none fabricated (6.0 s)
-deployed files checked by md5 on the target after copying: 5 (canfd-test, ctucan-hangsrv, ctucan-supervisor, dev-can-ctucanfd, ecu-sim)
-40 of 40 passed
-# results: build/test-results-20261103T173032Z.txt, exit 0
+PASS fi_busoff_auto: 300/300 in order, bus_off 1, recovered 1, largest gap 5.8 ms (1 ms pacing) (1.8 s)
+PASS fi_busoff_latch: hold still set 60 ms in (FAULT_STATE 2); 200/200 in order; largest gap 105.9 ms against 2 ms pacing (2.4 s)
+PASS fi_busoff_manual: 0 frames while bus-off, writer EAGAIN x1281, 100/100 in order after recovery (4.6 s)
+PASS fi_busoff_stuck_abort: 4 frames stuck aborting -> dropped and counted at the bound (tx_abort_forced 4), recovery, TX resumes (3.0 s)
+PASS fi_busoff_abort_notick: 4 frames stuck aborting dropped and counted at bus-off within the request (tx_abort_forced 4), hold kept (2.3 s)
+PASS fi_txdelay: 100/100 in order, max in flight 4, seqsend: 100 frame(s) in 195235 us, 182 EAGAIN retries (3.8 s)
+PASS fi_tx_budget: 300 TX + 300 RX complete and in order with 1 RX frame per pulse; tx_ok 300, 74 multi-buffer TX commands, 328 pulses (4.0 s)
+PASS fi_quiesce: 4 frames in flight -> aborted and counted (tx_aborted +4), restart, TX resumes (2.4 s)
+PASS fi_reset_retry: reset timeout -> ETIMEDOUT, core stopped, nothing sent; second restart -> queued frame sent, RX works (4.9 s)
+PASS fi_reset_storm: reset failed with RX frames left in the FIFO; 1 queued pulse(s) unmasked with the output off; 0 pulses in the next second; second restart, TX works (4.8 s)
+PASS fi_state_clear: OFF: 10/10 frames, no flush; bus-off then restart: overlay and hold gone, TX works (4.0 s)
+PASS fi_batches: 90/90 in order in 23 interrupt pulses of at most 4 frames, unmask_err 0; monitor: 63987 devctls, received 0 -> 90 in 23 steps, 200 answered while frames were still coming, longest 2636 us (5.2 s)
+PASS fi_reader_budget: 4 mailboxes x 10 frames, every reader finished; 30 pulses held RBNEI for readers, 40 mailbox returns (7.2 s)
+PASS fi_reader_nowake: 5 frames, 5 recoveries after 8 fruitless returns each, 5 frames dropped and counted, 40 pulses in all; then the blocked reader got the next 3 frames (4.2 s)
+PASS fi_tx_order: 1000/1000 in order across 249 multi-buffer TX commands (4.1 s)
+PASS fi_tx_order_fixed: 996 order breaks in 1000 frames across 249 multi-buffer TX commands (4.1 s)
+PASS fi_rx_corrupt: RWCNT one short, frames back to back: 5 delivered intact, 15 flushed, 1 flush, none fabricated; RWCNT 31, paced: 19 delivered intact, 1 flushed, 1 flush, none fabricated (5.9 s)
+deployed files checked by md5 on the target after copying: 10 (tc2:canfd-test, tc2:ctucan-hangsrv, tc2:ctucan-supervisor, tc2:dev-can-ctucanfd, tc2:ecu-sim, tc:canfd-test, tc:ctucan-hangsrv, tc:ctucan-supervisor, tc:dev-can-ctucanfd, tc:ecu-sim)
+41 of 41 passed
+# results: build/test-results-20261104T003125Z.txt, exit 0
