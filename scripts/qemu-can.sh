@@ -22,13 +22,15 @@ fi
 # A QEMU of this image that still runs (for example the one `mkqnximage
 # --run` started, which may not have written its pid file yet, so that
 # `mkqnximage --stop` misses it) holds the disk lock. mkqnximage starts QEMU in
-# the target directory, so stop every QEMU working there, until none has been
-# seen for a second.
+# the target directory, so stop every QEMU working there, and the one in the
+# pid file (a QEMU this script started is daemonised and works in /), until
+# none has been seen for a second.
+P=$(cat "$D/output/qemu.pid" 2>/dev/null || true)
 quiet=0; tries=0
 while [ $quiet -lt 5 ]; do
     found=0
     for p in $(pgrep -f '^qemu-system-' || true); do
-        if [ "$(readlink "/proc/$p/cwd" 2>/dev/null)" = "$D" ]; then
+        if [ "$p" = "$P" ] || [ "$(readlink "/proc/$p/cwd" 2>/dev/null)" = "$D" ]; then
             [ $tries = 0 ] && echo "stopping QEMU pid $p, which runs this target"
             kill "$p" 2>/dev/null || true; found=1
         fi
