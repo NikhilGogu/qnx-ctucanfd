@@ -1,0 +1,21 @@
+dev-can-ctucanfd
+Copyright 2026 The ctucanfd authors
+Licensed under the Apache License 2.0, see LICENSE.
+
+Where the register map comes from
+
+src/ctucanfd_regs.h is the register map of the CTU CAN FD core. Its header
+says it was written from the public CTU CAN FD IP core datasheet
+(https://canbus.pages.fel.cvut.cz/ctucanfd_ip_core/doc/Datasheet.pdf) and from
+the PCI wrapper layout that QEMU's ctucan_pci models.
+
+docs/DESIGN.md says that what the QEMU 6.2 model leaves out or does
+differently comes from reading hw/net/can/ctucan_core.c and ctucan_pci.c in
+QEMU, confirmed where a register read could show it. It also says that the
+rotating TXT buffer priorities follow the scheme Linux's ctucanfd driver
+uses (section 5).
+
+Third-party products
+
+The QNX CAN DDK (libcan) and QNX SDP are QNX products under their own
+licence and are not part of this repository.

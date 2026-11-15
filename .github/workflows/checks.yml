@@ -1,0 +1,70 @@
+# Static checks that run on a hosted Ubuntu runner without QNX.
+#
+# The driver build and the 41 end-to-end tests need a QNX SDP 8.0 and QEMU
+# with the ctucan_pci board. They are not run on hosted runners. The results
+# of the last full run are in docs/test-results.txt.
+name: checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  scripts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Python syntax
+        run: |
+          export PYTHONPYCACHEPREFIX="$RUNNER_TEMP/pycache"
+          python3 -m py_compile scripts/tests/ctutest.py codelab/dryrun/gen_pass.py
+
+      - name: Shell syntax
+        run: |
+          for f in scripts/*.sh codelab/dryrun/*.sh; do
+            bash -n "$f"
+          done
+
+      # Warnings and errors only. Excluded, all intended:
+      # SC1090 (the QNX SDP environment file is not on the runner),
+      # SC2034 (a loop counter), SC2088 (a literal ~ passed to gen_pass.py).
+      - name: ShellCheck
+        run: |
+          shellcheck --severity=warning --exclude=SC1090,SC2034,SC2088 \
+            scripts/*.sh codelab/dryrun/*.sh
+
+  links:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Relative links in the Markdown files must point at files in the repository.
+      - name: Relative links
+        run: |
+          status=0
+          for md in README.md docs/*.md codelab/*.md; do
+            dir=$(dirname "$md")
+            for target in $(grep -o '\]([^)#]*[)#]' "$md" | sed 's/^](//; s/[)#]$//' | grep -v -e '^https\?:' -e '^$' || true); do
+              if [ ! -e "$dir/$target" ]; then
+                echo "$md: missing $target"
+                status=1
+              fi
+            done
+          done
+          exit $status
+
+      # External links in the README. A site that is down fails this job.
+      - name: README web links
+        run: |
+          status=0
+          for url in $(grep -o '(https\?://[^)]*)' README.md | tr -d '()' | sort -u); do
+            code=$(curl -s -o /dev/null -L --max-time 30 --retry 2 -w '%{http_code}' "$url" || true)
+            echo "$code $url"
+            [ "$code" = 200 ] || status=1
+          done
+          exit $status
