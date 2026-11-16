@@ -8,7 +8,7 @@ Runs on the Linux host against a QEMU target started with scripts/qemu-can.sh
 SocketCAN socket, so every frame is checked in full: identifier, format,
 length, every payload byte including padding, and sequence numbers.
 
-    scripts/tests/ctutest.py [--target tc] [--peer tc2] [--if vcan0] [--list] [TEST ...]
+    scripts/tests/ctutest.py [--target tc] [--peer tc2] [--if vcan0] [--junit FILE] [--list] [TEST ...]
 
 Tests whose name starts with fi_ run against the fault-injection build
 (make FI=1). two_nodes needs a second target on the same host interface
@@ -26,9 +26,10 @@ import subprocess
 import sys
 import threading
 import time
+import xml.etree.ElementTree as ET
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-QTARGET = os.environ.get("QTARGET", os.path.expanduser("~/bin/qtarget"))
+QTARGET = os.environ.get("QTARGET", os.path.join(ROOT, "scripts", "qtarget-lite.sh"))
 EFF, RTR = 0x80000000, 0x40000000
 BRS, ESI = 0x01, 0x02     # canfd_frame.flags: CANFD_BRS, CANFD_ESI
 FD_LENS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 12, 16, 20, 24, 32, 48, 64]
@@ -1188,11 +1189,31 @@ ORDER = ["tx_lengths", "rx_lengths", "rtr", "ids", "write_path", "extended_mailb
          "fi_rx_corrupt"]
 
 
+def junit_xml(results, suite="ctutest"):
+    """JUnit XML for CI: one testcase per test run. results: (name, status, detail) with status
+    PASS, FAIL or SKIP; the detail of a failure or skip becomes its message and text. No times are
+    written, so the file carries pass and fail only."""
+    root = ET.Element("testsuites")
+    ts = ET.SubElement(root, "testsuite", name=suite, tests=str(len(results)),
+                       failures=str(sum(1 for r in results if r[1] == "FAIL")),
+                       skipped=str(sum(1 for r in results if r[1] == "SKIP")), errors="0")
+    for name, status, detail in results:
+        tc = ET.SubElement(ts, "testcase", classname=suite, name=name)
+        if status == "FAIL":
+            ET.SubElement(tc, "failure", message=detail.splitlines()[0] if detail else "failed").text = detail
+        elif status == "SKIP":
+            ET.SubElement(tc, "skipped", message=detail)
+        elif detail:
+            ET.SubElement(tc, "system-out").text = detail
+    return ET.tostring(root, encoding="unicode", xml_declaration=True) + "\n"
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--target", default="tc")
     ap.add_argument("--peer", help="second target on the same host interface, for two_nodes")
     ap.add_argument("--if", dest="ifname", default="vcan0")
+    ap.add_argument("--junit", metavar="FILE", help="also write the results as JUnit XML (no times)")
     ap.add_argument("--list", action="store_true")
     ap.add_argument("tests", nargs="*")
     a = ap.parse_args()
@@ -1207,17 +1228,24 @@ def main():
     PEER = a.peer
     t, bus = Target(a.target), Bus(a.ifname)
     failed = skipped = 0
+    results = []
     for n in sel:
         t0 = time.monotonic()
         try:
             detail = by_name[n](t, bus)
             print(f"PASS {n}: {detail} ({time.monotonic() - t0:.1f} s)", flush=True)
+            results.append((n, "PASS", str(detail)))
         except Skip as e:
             skipped += 1
             print(f"SKIP {n}: {e}", flush=True)
+            results.append((n, "SKIP", str(e)))
         except (Fail, subprocess.TimeoutExpired, AttributeError, ValueError, IndexError) as e:
             failed += 1
             print(f"FAIL {n}: {type(e).__name__}: {e} ({time.monotonic() - t0:.1f} s)", flush=True)
+            results.append((n, "FAIL", f"{type(e).__name__}: {e}"))
+    if a.junit:
+        with open(a.junit, "w") as f:
+            f.write(junit_xml(results))
     print(f"deployed files checked by md5 on the target after copying: {len(Target.deployed)} "
           f"({', '.join(sorted(Target.deployed))})")
     print(f"{len(sel) - failed - skipped} of {len(sel) - skipped} passed" + (f", {skipped} skipped" if skipped else ""))
