@@ -17,7 +17,7 @@ The tester checks every telemetry frame from node 1 (length, CRC-8, sequence), s
 
 ## Host unit tests
 
-`tests/host/` builds the hardware layer, `src/ctucanfd_hw.c`, with the host's C compiler and runs it against a fake core (`tests/host/fake_core.c`), with AddressSanitizer and UndefinedBehaviorSanitizer. They need no QNX SDP and no QEMU, and the `checks` workflow runs them with gcc and clang on every push and pull request:
+`tests/host/` builds the hardware layer, `src/ctucanfd_hw.c`, and the driver, `src/dev-can-ctucanfd.c`, with the host's C compiler and runs them against a fake core (`tests/host/fake_core.c`), with AddressSanitizer and UndefinedBehaviorSanitizer. The driver also runs against a fake libcan (`tests/host/fake_libcan.c`). They need no QNX SDP and no QEMU, and the `checks` workflow runs them with gcc and clang on every push and pull request:
 
 ```
 make -C tests/host run          # SAN= to build without the sanitizers
@@ -28,8 +28,9 @@ make -C tests/host run          # SAN= to build without the sanitizers
 | `test_dlc_timing` | DLC to length and back for every CAN FD size; bit timing at the start-up defaults, exact bit rate, valid fields and sample point within half a time quantum over a grid of clocks, rates and sample points; refused timings; BTR field packing |
 | `test_frames` | TXT buffer contents for classic, CAN FD (DLC rounding, zero padding, BRS) and remote frames; refused frames write nothing; TX_COMMAND and the rotating priorities; RX pops with FDF, BRS and ESI; QEMU's and the datasheet's word counts for remote frames; every bad format word refused after reading only that word; every length and id format written to a TXT buffer and read back from the FIFO unchanged |
 | `test_core` | Identification, soft reset and its timeout, the register writes of start and stop and their order (interrupt output off first and on last, timing before the core joins the bus) |
+| `test_driver` | The driver's own `main()` up to `can_resmgr_start()` and its shutdown; the TX ring (FIFO retirement, one TX command per refill, order breaks counted, failed, aborted and lost buffers, the counters wrapping at 2^32 with 1, 2 and 4 buffers); bus-off (TX held through none and error passive, released at error active, in-flight frames aborted, ERCRST with `-a` and on RECOVER); warning limit, error passive and bus error types; interrupt service (spurious pulses, 64 frames per pulse, 8 passes per pulse, output off at every `InterruptUnmask()`, a stopped core left quiet, refused unmasks counted); reader wake-ups (one return per waiting mailbox, RBNEI held while returns are left, a mailbox that wakes nobody dropped after 8 pulses); every devctl size check and refusal |
 
-The fake core models only what the hardware layer relies on, as `src/ctucanfd_regs.h` and `docs/DESIGN.md` describe it. It is not a model of the silicon or of QEMU. `tests/host/shim/sys/can_dcmd.h` defines the few `CAN_MSG` names the hardware layer uses so it builds without the SDP; it is our own stand-in, not QNX's header. Everything that needs libcan, the PCI server or interrupts is covered by the end-to-end suite below.
+The fake core models only what the code relies on, as `src/ctucanfd_regs.h` and `docs/DESIGN.md` describe it. It is not a model of the silicon or of QEMU. The fake libcan follows the DDK text quoted in DESIGN.md section 3.1: the event handler is called until it returns NULL, and each returned RX mailbox wakes one blocked reader. It says nothing about how libcan schedules pulses against clients. The headers in `tests/host/shim/` define the QNX names the driver uses so it builds without the SDP; they are our own stand-ins, written from how this repository uses the names, not QNX's headers. Real interrupts, the PCI server and libcan itself are covered only by the end-to-end suite below.
 
 ## The suite and its results
 

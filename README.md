@@ -100,7 +100,7 @@ This is a test fixture path, QEMU only. Production CAN controllers such as FlexC
 | `tools/ctucan-supervisor.c` | Starts the driver again when it dies |
 | `probe/ctucan_probe.c` | Reads the board's identification registers |
 | `scripts/` | QEMU launch with the CAN board, host vcan setup, gate test, full test suite |
-| `tests/host/` | Unit tests of the hardware layer on a fake core, built with the host compiler; CI runs them |
+| `tests/host/` | Unit tests of the hardware layer and the driver on a fake core and a fake libcan, built with the host compiler; CI runs them |
 | `docs/DESIGN.md` | How it works and what was measured |
 | `docs/TESTS.md`, `docs/test-results.txt` | What the 41 tests cover, the measurements, and the recorded run |
 | `NOTICE` | Where the register map comes from |
@@ -213,7 +213,7 @@ The tester's measurements (telemetry, echo round trips, diagnostic requests) are
 
 `scripts/test-suite.sh tc vcan0 [tc2]` builds both variants and runs `scripts/gate-test.sh` and every test in `scripts/tests/ctutest.py` against the QEMU target, keeping the output in `build/test-results-*.txt`. The host side uses a raw SocketCAN socket and `candump -L`, and checks complete frames: identifier, format, length, every payload byte including padding, and sequence numbers. The recorded run (commit c9c7745, from a clean clone, two QNX 8.0 x86_64 targets under QEMU 6.2 with KVM): the gate test and 41 of 41 tests passed, two-node test included. [docs/test-results.txt](docs/test-results.txt) has every result line.
 
-The hardware layer also has unit tests that need no QNX: `make -C tests/host run` builds `src/ctucanfd_hw.c` with the host compiler against a fake core and checks DLC tables, bit timing, TXT buffer encoding and the RX format-word checks. The `checks` workflow runs them on every push.
+The hardware layer and the driver also have unit tests that need no QNX: `make -C tests/host run` builds `src/ctucanfd_hw.c` and `src/dev-can-ctucanfd.c` with the host compiler against a fake core and a fake libcan. They check DLC tables, bit timing, TXT buffer encoding, the RX format-word checks, the TX ring, error and bus-off handling, the interrupt service bounds, reader wake-ups and the devctl checks ([docs/TESTS.md](docs/TESTS.md)). The `checks` workflow runs them on every push.
 
 What the tests cover, with the numbers: [docs/TESTS.md](docs/TESTS.md). They check every frame length and id format both ways, byte for byte; concurrent readers and writers; bounded interrupt service; TX order; driver restart under load with the supervisor; two QNX nodes; and error, bus-off and reset paths through the fault injector.
 

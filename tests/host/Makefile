@@ -1,5 +1,6 @@
-# Host unit tests for the parts of the driver that need no QNX: the hardware
-# layer (src/ctucanfd_hw.c) on a fake core, and pure helpers. Any C11 compiler:
+# Host unit tests: the hardware layer (src/ctucanfd_hw.c) on a fake core, and
+# the driver (src/dev-can-ctucanfd.c) on that core with a fake libcan and the
+# stand-in headers in shim/. Any C11 compiler:
 #   make -C tests/host run
 # SAN= turns the sanitizers off where the toolchain has none.
 SRC     := ../../src
@@ -9,8 +10,9 @@ CFLAGS  := -std=gnu11 -O1 -g -Wall -Wextra -Werror -Wshadow \
 SAN     ?= -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer
 
 HW      := $(SRC)/ctucanfd_hw.c fake_core.c
-HDRS    := $(SRC)/ctucanfd_hw.h $(SRC)/ctucanfd_regs.h fake_core.h check.h shim/sys/can_dcmd.h
-TESTS   := test_dlc_timing test_frames test_core
+HDRS    := $(SRC)/ctucanfd_hw.h $(SRC)/ctucanfd_regs.h fake_core.h check.h $(wildcard shim/*.h shim/*/*.h)
+DRV     := $(SRC)/dev-can-ctucanfd.c $(SRC)/ctucanfd_devctl.h fake_libcan.c fake_libcan.h
+TESTS   := test_dlc_timing test_frames test_core test_driver
 
 all: $(addprefix $(BUILD)/,$(TESTS))
 
@@ -19,6 +21,10 @@ $(BUILD):
 
 $(BUILD)/%: %.c $(HW) $(HDRS) | $(BUILD)
 	$(CC) $(CFLAGS) $(SAN) -o $@ $< $(HW)
+
+# includes the driver source; see the comment at the top of test_driver.c
+$(BUILD)/test_driver: test_driver.c $(HW) $(HDRS) $(DRV) | $(BUILD)
+	$(CC) $(CFLAGS) $(SAN) -o $@ $< $(HW) fake_libcan.c
 
 run: all
 	@for t in $(TESTS); do ./$(BUILD)/$$t || exit 1; done
