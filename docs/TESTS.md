@@ -27,6 +27,7 @@ make -C tests/host run          # SAN= to build without the sanitizers
 |---|---|
 | `test_dlc_timing` | DLC to length and back for every CAN FD size; bit timing at the start-up defaults, exact bit rate, valid fields and sample point within half a time quantum over a grid of clocks, rates and sample points; refused timings; BTR field packing |
 | `test_frames` | TXT buffer contents for classic, CAN FD (DLC rounding, zero padding, BRS) and remote frames; refused frames write nothing; TX_COMMAND and the rotating priorities; RX pops with FDF, BRS and ESI; QEMU's and the datasheet's word counts for remote frames; every bad format word refused after reading only that word; every length and id format written to a TXT buffer and read back from the FIFO unchanged |
+| `test_time` | 32-bit timestamps across the 2^32 us wrap, offsets set before and after a wrap, the 64-bit value counting on with the same low 32 bits |
 | `test_core` | Identification, soft reset and its timeout, the register writes of start and stop and their order (interrupt output off first and on last, timing before the core joins the bus) |
 
 The fake core models only what the hardware layer relies on, as `src/ctucanfd_regs.h` and `docs/DESIGN.md` describe it. It is not a model of the silicon or of QEMU. `tests/host/shim/sys/can_dcmd.h` defines the few `CAN_MSG` names the hardware layer uses so it builds without the SDP; it is our own stand-in, not QNX's header. Everything that needs libcan, the PCI server or interrupts is covered by the end-to-end suite below.
