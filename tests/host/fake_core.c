@@ -9,6 +9,8 @@ fake_core_t fake;
 
 static unsigned rx_len[FAKE_RX_WORDS];     /* words of each frame in the FIFO, oldest first */
 static unsigned rx_nlen, rx_left;          /* frames queued; words left of the frame being read */
+static fake_wr_t posted_q[64];             /* writes not yet at the core (fake.posted) */
+static unsigned nposted;
 
 static void fake_reset(void)
 {
@@ -26,6 +28,7 @@ static void fake_reset(void)
 void fake_init(ctucan_hw_t *hw)
 {
     memset(&fake, 0, sizeof(fake));
+    nposted = 0;
     fake_reset();
     fake.device_id = 0x0202u << 16 | CTUCAN_ID_VALUE;   /* version 2.2 */
     hw->base = (volatile uint8_t *)fake.mem;
@@ -69,9 +72,16 @@ static void rx_flush(void)
     rx_nlen = rx_left = 0;
 }
 
+static void apply_wr(uint32_t off, uint32_t val);
+
 uint32_t ctucan_rd(const ctucan_hw_t *hw, uint32_t off)
 {
     (void)hw;
+    /* a read completes only after the writes posted before it */
+    for (unsigned i = 0; i < nposted; i++) {
+        apply_wr(posted_q[i].off, posted_q[i].val);
+    }
+    nposted = 0;
     switch (off) {
     case CTUCAN_DEVICE_ID:
         return fake.device_id;
@@ -109,6 +119,17 @@ void ctucan_wr(const ctucan_hw_t *hw, uint32_t off, uint32_t val)
         fake.log[fake.nlog].val = val;
         fake.nlog++;
     }
+    if (fake.posted && nposted < sizeof(posted_q) / sizeof(posted_q[0])) {
+        posted_q[nposted].off = off;
+        posted_q[nposted].val = val;
+        nposted++;
+        return;
+    }
+    apply_wr(off, val);
+}
+
+static void apply_wr(uint32_t off, uint32_t val)
+{
     switch (off) {
     case CTUCAN_MODE:
         if ((val & MODE_RST) && !fake.reset_stuck) {

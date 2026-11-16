@@ -505,6 +505,9 @@ static void suppress(drv_t *d)
 {
     if (!d->suppressed) {
         ctucan_wr(&d->hw, CTUCAN_INT_ENA_CLR, d->int_ena);
+        /* The write is posted; a read from the core completes only after it,
+         * so the output is off before the caller unmasks the line. */
+        (void)ctucan_rd(&d->hw, CTUCAN_INT_ENA_SET);
         d->suppressed = true;
     }
 }
