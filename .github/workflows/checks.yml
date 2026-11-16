@@ -80,6 +80,6 @@ jobs:
           for url in $(grep -o '(https\?://[^)]*)' README.md | tr -d '()' | sort -u); do
             code=$(curl -s -o /dev/null -L --max-time 30 --retry 2 -w '%{http_code}' "$url" || true)
             echo "$code $url"
-            [ "$code" = 200 ] || status=1
+            case "$code" in 200|429) ;; *) status=1 ;; esac  # 429: the site rate-limits CI runners
           done
           exit $status
