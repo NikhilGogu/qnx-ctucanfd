@@ -276,6 +276,6 @@ Still open:
 - ARM register access ordering is not reviewed, and the aarch64le build has not run (section 11).
 - Interrupt pulses are not authenticated (section 11); `spoofed_irq_pulse` shows the refused unmask.
 - Devctl latency has no upper bound (sections 3.2, 11), and bus-off and a `SET_TIMING` restart wait for TXT buffer aborts on libcan's thread (sections 5 and 8).
-- No test overruns the RX FIFO, so the DOR-before-DOI order is in the code but untested.
+- No end-to-end test overruns the RX FIFO; the DOR-before-DOI order is checked only by the host unit tests (`test_driver`).
 - The unwinding of a partial start-up is not exercised by a test.
 - Hardware acceptance filters (section 4.1) and an explicit interrupt thread (section 3.4) are not done.
