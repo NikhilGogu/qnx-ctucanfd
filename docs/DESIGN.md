@@ -2,7 +2,7 @@
 
 `dev-can-ctucanfd` v0.2.0 is a native QNX 8.0 CAN driver, built on the CAN DDK (`libcan.a`), for the CTU CAN FD IP core on PCI. QEMU emulates that board as `ctucan_pci`, so CAN and CAN FD software for QNX can run in QEMU with no hardware and talk to host tools over SocketCAN. The only other QEMU CAN path for QNX that we found, dev-can-linux, runs Linux SJA1000 drivers (kvaser_pci), which cannot carry CAN FD.
 
-Measurements ran on the build box (Ubuntu 22.04, QEMU 6.2.0) against a QNX 8.0 x86_64 target built with mkqnximage.
+Measurements ran on one Linux host (Ubuntu 22.04, QEMU 6.2.0) against a QNX 8.0 x86_64 target built with mkqnximage.
 
 ## 1. The hardware as QEMU 6.2 models it
 
@@ -110,15 +110,15 @@ Measured on tc (`docs/test-results.txt`):
 - `fi_batches`: the same with the batch forced down to 4 frames: 90/90 frames in order in 23 pulses, `unmask_err` 0, 200 devctl answers while frames were coming, longest devctl 2636 us at that load.
 - `fi_reader_budget`: one mailbox return per pulse and readers blocked on four mailboxes: every reader finished, with 30 pulses holding RBNEI for readers. An earlier version of this test put all four readers on one mailbox: there was one interrupt pulse and one mailbox return, and all four readers got their 10 frames, so one return can wake several readers of a mailbox. The test therefore spreads the readers over four mailboxes, where each return wakes only that mailbox's readers.
 
-libcan's thread takes pulses and client messages in priority order (MsgReceive), so a sustained stream of interrupts at a priority above the clients' can keep a client waiting for longer (section 12).
+libcan's thread takes pulses and client messages in priority order (MsgReceive), so a sustained stream of interrupts at a priority above the clients' can keep a client waiting for longer (section 11).
 
 While the core is stopped (a restart whose reset failed, or shutdown) an interrupt pulse is unmasked as usual but the core's output is left off, so status left in the core cannot bring pulse after pulse (`stopped_pulses`). `fi_reset_storm`: a reset that never reaches the core, with RX frames left in the FIFO and a pulse queued behind the restart, gave 1 such pulse and then no pulse in the next second; the same test with this check removed from the driver saw 693 pulses.
 
-A client that sends a pulse with the interrupt code would make the driver unmask an interrupt it did not mask; the kernel refuses when nothing is masked and the driver counts it (`spoofed_irq_pulse`). The driver cannot tell such a pulse from a real one; section 12.
+A client that sends a pulse with the interrupt code would make the driver unmask an interrupt it did not mask; the kernel refuses when nothing is masked and the driver counts it (`spoofed_irq_pulse`). The driver cannot tell such a pulse from a real one; section 11.
 
-### 3.3 Lost interrupt (stage one) and the output toggle
+### 3.3 Lost interrupt and the output toggle
 
-The stage-one driver stalled under a 1 ms paced burst: the controller held a full FIFO and a pending, enabled interrupt that never fired (`INT_STAT 0x00000409`, `RX_STATUS 0x00000660`). An event that arrived between the last INT_STAT read and the unmask left the line asserted, and no new interrupt came for a line that was already high. Stage one re-read INT_STAT after unmasking and looped. The driver now disables the core's interrupt output before unmasking and enables it afterwards, so a pending event produces a fresh rising edge after the unmask. `rearm_pending` counts the times an event was pending at that point.
+The first version of the driver stalled under a 1 ms paced burst: the controller held a full FIFO and a pending, enabled interrupt that never fired (`INT_STAT 0x00000409`, `RX_STATUS 0x00000660`). An event that arrived between the last INT_STAT read and the unmask left the line asserted, and no new interrupt came for a line that was already high. That version re-read INT_STAT after unmasking and looped. The driver now disables the core's interrupt output before unmasking and enables it afterwards, so a pending event produces a fresh rising edge after the unmask. `rearm_pending` counts the times an event was pending at that point.
 
 ### 3.4 Explicit IST (not in v0.1)
 
@@ -154,7 +154,7 @@ Tests (`scripts/tests/ctutest.py`, numbers from `docs/test-results.txt`):
 
 - `tx_order`: one writer with no pacing, 2000 frames: all 2000 reached vcan0 in order. In QEMU a TXT buffer completes inside the TX_COMMAND write, so the driver rarely has several frames ready at once (max in flight 3, 0 multi-buffer commands in that run).
 - `fi_tx_order`: the fault-injection build holds each completion until a 4 ms grid point at least 5 ms later and releases at most three per millisecond, oldest first, so the driver refills several buffers in one command at changing ring positions: 1000/1000 frames in order across 249 multi-buffer TX commands, max 4 in flight, `tx_order_err 0`. QEMU sent each frame when it was set ready, so this checks the order the driver sets buffers ready and the priorities QEMU applies to buffers ready together.
-- `fi_tx_order_fixed`: the same run with the stage-one fixed priorities (buffer n gets n + 1) as a negative control: 996 order breaks in 1000 frames.
+- `fi_tx_order_fixed`: the same run with the first version's fixed priorities (buffer n gets n + 1) as a negative control: 996 order breaks in 1000 frames.
 
 ## 6. CAN FD
 
@@ -226,19 +226,11 @@ Measured on tc (`ctutest.py ecu_sim`, 30 s, `candump -L vcan0,18F:7FF,7E8:7FF` o
 
 A second target with its own `ctucan_pci` board, started by `qemu-can.sh` on the same `vcan0`, is a second node. Each QEMU has its own CAN bus object and its own SocketCAN bridge; the host's vcan delivers each frame to every other socket on the interface, so a frame from node 1 reaches node 2's QEMU and `candump`, and a QEMU does not get its own frames back. There is no arbitration, acknowledgement, error signalling or bit timing between them.
 
-`two_nodes` (`ctutest.py --peer tc2`): the drivers on both targets start with the defaults; ecu-sim runs on tc; `canfd-test tester /dev/can1/rx0 /dev/can1/tx1 30` runs on tc2; `candump -L` on the host records ids 18F, 1E0, 1E8, 7DF and 7E8. The tester checks every telemetry frame (64 bytes, CRC-8, sequence), sends a 64-byte echo request on 0x1E0 every 10 ms and times its reply on 0x1E8 on tc2's clock, so the two guests' clocks need not agree, and sends 7DF#02015B once a second. The host side checks that `vcan0` carried every telemetry period without a hole, that the tester's range is inside it with nothing missing, that every echo request and reply on `vcan0` has the right sequence and all 64 bytes, with BRS, and that ecu-sim's counts match. Measured (`docs/test-results.txt`): 3094 of 3094 telemetry frames, period at tc2's driver mean 10.000 ms (9.368 to 10.644); 3000 of 3000 round trips, min 2.751 ms, median 3.271, 99th percentile 3.681, max 4.162; tc's part, from request to reply on `vcan0`, median 1.700 ms, 99th percentile 1.998, max 2.243; 30 of 30 diagnostic answers. These are QEMU timing on the build box. The other half of the round trip is tc2's own way out and in, through its QEMU bridge, driver and tester; QEMU does not let us split it further.
+`two_nodes` (`ctutest.py --peer tc2`): the drivers on both targets start with the defaults; ecu-sim runs on tc; `canfd-test tester /dev/can1/rx0 /dev/can1/tx1 30` runs on tc2; `candump -L` on the host records ids 18F, 1E0, 1E8, 7DF and 7E8. The tester checks every telemetry frame (64 bytes, CRC-8, sequence), sends a 64-byte echo request on 0x1E0 every 10 ms and times its reply on 0x1E8 on tc2's clock, so the two guests' clocks need not agree, and sends 7DF#02015B once a second. The host side checks that `vcan0` carried every telemetry period without a hole, that the tester's range is inside it with nothing missing, that every echo request and reply on `vcan0` has the right sequence and all 64 bytes, with BRS, and that ecu-sim's counts match. Measured (`docs/test-results.txt`): 3094 of 3094 telemetry frames, period at tc2's driver mean 10.000 ms (9.368 to 10.644); 3000 of 3000 round trips, min 2.751 ms, median 3.271, 99th percentile 3.681, max 4.162; tc's part, from request to reply on `vcan0`, median 1.700 ms, 99th percentile 1.998, max 2.243; 30 of 30 diagnostic answers. These are QEMU timing on that Linux host. The other half of the round trip is tc2's own way out and in, through its QEMU bridge, driver and tester; QEMU does not let us split it further.
 
 The codelab (`codelab/qnx-canfd-qemu.md`) walks through the same setup by hand.
 
-## 11. Demo storyline (under 3 minutes)
-
-1. Problem (20 s): CAN FD software for QNX normally needs a CAN FD board on the desk. QEMU emulates one; there was no public QNX driver for it that we found.
-2. Architecture (20 s): QEMU ctucan_pci, PCI server, dev-can-ctucanfd on libcan, `/dev/can1/*`, the QEMU bus bridged to host vcan0.
-3. Live ECU (50 s): ecu-sim on QNX sends a 64-byte CAN FD status frame every 10 ms; the host runs `candump -t d vcan0,18F:7FF` to show the period, and `cansend vcan0 7DF#02015B` gets the answer on 7E8.
-4. Fault and recovery (45 s): `slay -s KILL dev-can-ctucanfd` mid-stream. The kernel, ecu-sim and the shell carry on; the supervisor restarts the driver, ecu-sim reopens `/dev/can1/tx1`, candump shows the gap (section 9), and the period resumes.
-5. Proof (30 s): `scripts/test-suite.sh` results, the fault-injection bus-off run, `canctl -i`, the repository.
-
-## 12. Known limits
+## 11. Known limits
 
 - Tested in QEMU 6.2 only. QEMU has no bit timing, error counters, fault confinement or bus timing.
 - The error and bus-off paths are tested only through the fault injector, which plays scripted register sequences to the driver (section 8).
@@ -252,48 +244,38 @@ The codelab (`codelab/qnx-canfd-qemu.md`) walks through the same setup by hand.
 - A `SET_TIMING` restart discards frames still in the RX FIFO (counted in `rx_flushed`).
 - Devctl latency has no upper bound: a sustained interrupt load at a priority above the clients' can delay them (section 3.2).
 
-## 13. Review findings
+## 12. Defects found and fixed
 
-Status: fixed (with the test that shows it), partly fixed, or open.
+Each row is a defect found in an earlier version of the driver or its tools, how it was fixed, and the test that shows the fix.
 
-Stage-one code, correctness:
+| Defect | Fix | Test |
+|---|---|---|
+| Interrupt service had no bound per pulse, and unmasks were not accounted | Bounded batches per pulse and one checked `InterruptUnmask()` per pulse; the driver sends itself no pulses (section 3.2) | `burst_batches`, `fi_batches`, `spoofed_irq_pulse` |
+| An event between the last status read and the unmask left the line high, and no new interrupt came | The core's interrupt output goes off before the unmask and on after it, so pending status raises the line again (section 3.3) | the paced burst in `gate-test.sh`; `rearm_pending` counts the cases |
+| Readers stayed blocked while their mailbox held frames | A mailbox is returned while it has frames and blocked readers; returns left over hold RBNEI for the next pulse | `readers`, `fi_reader_budget` |
+| A return that woke nobody was dropped and RBNEI released | The notification is kept for up to 8 pulses, then the queued frames are dropped, counted and logged | `fi_reader_nowake` |
+| TXT buffers could be reused before they were final, and an unexpected Empty went unseen | Writability checked before each write, the driver's own record per buffer, Empty while in flight counted | `fi_txdelay`, `write_path` |
+| TX completions were lost when the RX budget ran out, and one pass read TX_STATUS several times | TX retirement runs outside the RX budget, from one TX_STATUS snapshot per pass | `fi_tx_budget`, `fi_tx_order` |
+| The warning level was read from FAULT_STATE only, and DOI was cleared before DOR | STATUS.EWL is tracked on its own; DOR is cleared before DOI | `fi_warn`, `fi_passive` |
+| Any FAULT_STATE other than bus-off released a bus-off, and the abort wait had no bound | TX is held until FAULT_STATE reads error active; aborts are given up at 20 ms | `fi_busoff_latch`, `fi_busoff_stuck_abort`, `fi_busoff_auto`, `fi_busoff_manual` |
+| The abort deadline depended on traffic or on the fault-injection tick | The driver waits for the aborts at the point of bus-off, at most 20 ms (section 8) | `fi_busoff_abort_notick` |
+| An RX word count was consumed before it was checked | The format word is checked against its DLC first, and the FIFO is flushed on any mismatch (section 4) | `fi_rx_corrupt`, `tests/host/test_frames.c` |
+| The id format was guessed from the id bits, RTR frames that need CAN FD were accepted, short devctl payloads were read, and SJW was checked against one phase segment | `-x` sets the id format, such RTR frames are refused, payload sizes are checked first, SJW is checked against both segments | `ids`, `extended_mailbox`, `rtr`, `devctl_sizes`, `timing` |
+| Start-up ignored the core count, device creation results and a reset timeout | BAR0's core count is checked (`-c 2` refused, checked by hand), every result is checked with unwinding, and a reset timeout fails start-up and restart | `fi_reset_retry`, `sigterm` |
+| A successful reset retry left the core marked as stopped | `hw_started` is set only after a successful reset and start | `fi_reset_retry` |
+| After a failed reset, each pulse turned the core's output on again, so pulses kept coming | The output stays off while the core is stopped; the pulse is still unmasked | `fi_reset_storm` |
+| A failed `InterruptDetach()` leaked an interrupt attachment | The second attachment is gone; the driver attaches once | none |
+| Fault-injection state survived scenario OFF and a reset | OFF and a reset clear every overlay | `fi_state_clear` |
+| The normal build accepted the fault-injection devctls | It answers them like any unknown command | `fi_rejected_normal` |
+| The supervisor trusted the path name, waited for ever and ignored spawn failures | It checks the server pid and a bounded `GET_INFO`, kills and restarts on timeout, and counts spawn failures | `supervisor_readiness` |
+| The supervisor's readiness probe could hang on a server that never replies | The probe runs in a forked child that is abandoned at 200 ms | `supervisor_hang` |
+| A failed copy could leave an old binary on the target | The gate test and the suite compare the md5 on the target with the build after every copy | every run |
 
-| Item | Status |
-|---|---|
-| 1. Unbounded service, mask accounting, synthetic pulses, queued-pulse race | Fixed: bounded batches, one checked `InterruptUnmask(0, iid)` per pulse, no synthetic pulses (section 3.2). Tests: `burst_batches`, `fi_batches`, `spoofed_irq_pulse`. With one attachment the kernel delivers one pulse per unmask; the remaining race, an event between the last read and the unmask, is closed by the output toggle (`rearm_pending`). |
-| 2. Stranded readers | Fixed: a mailbox is returned while it has frames and blocked readers; left-over returns hold RBNEI for the next pulse. Tests: `readers`, `fi_reader_budget`. |
-| 3. TX lifecycle | Fixed: writability checked, own completion metadata, unexpected EMPTY counted, bounded quiesce and abort, dropped frames counted. Tests: `fi_txdelay`, `fi_quiesce`, `fi_tx_budget`, `write_path`. |
-| 4. Errors and bus-off | Fixed: STATUS.EWL tracked apart from FAULT_STATE, DOR cleared before DOI, bus-off hold until error active. Tests: `fi_warn`, `fi_passive`, `fi_busoff_auto`, `fi_busoff_manual`, `fi_busoff_latch`, `fi_busoff_stuck_abort`. Partly: the DOR/DOI order is in the code but no test overruns the FIFO. |
-| 5. RX framing | Fixed: format word checked before anything else is consumed, FIFO flushed on any mismatch. Test: `fi_rx_corrupt`. |
-| 6. Input semantics | Fixed: explicit id format (`-x`), RTR that would need CAN FD refused, payload sizes checked, SJW against both phase segments. Tests: `ids`, `extended_mailbox`, `rtr`, `devctl_sizes`, `timing`. |
-| 7. Startup and shutdown | Fixed: BAR0 core count (`-c 2` refused, checked by hand, section 2.3), every device-creation result checked with unwinding, reset timeout fails start-up and restarts (`fi_reset_retry`), SIGTERM reaches cleanup (`sigterm`), bounded TX quiescence (`fi_quiesce`). Partly: the unwinding of a partial start-up is not exercised by a test. |
-| ARM ordering before claiming ARM support | Open: ARM ordering not reviewed; the aarch64le build has not run (section 12). |
+Still open:
 
-Stage-one code, design and scope: the IST description is corrected (section 3.1); one active core per board and untested shared INTx are listed in section 12; fault injection, the supervisor, ecu-sim, four TXT buffers and the aarch64le build are done; two QNX nodes are done in v0.2.0 (section 10b); hardware filters are not done, since QEMU 6.2 has none (section 4.1); an explicit IST is not done; `gate-test.sh` reports copy and start failures and compares complete frames.
-
-v0.1, ranked defects:
-
-| Defect | Status |
-|---|---|
-| 1. RX: wrong in-range RWCNT consumed before validation | Fixed: count checked against DLC before consuming, flush on disagreement. Test: `fi_rx_corrupt` (format-word lookalike payloads, frames back to back). |
-| 2. TX completions lost at budget exhaustion; several TX_STATUS reads | Fixed: TX retirement outside the RX budget, one snapshot per pass. Tests: `fi_tx_budget`, `fi_tx_order`. |
-| 3. Continuation fallback strands readers; `cont_queued` can stick | Fixed by removing the continuation: left-over work keeps a status bit pending in the core. Tests: `fi_reader_budget`, `burst_batches`. |
-| 4. Failed `InterruptDetach()` leaks an attachment; IRQ pulses not authenticated | Fixed for the leak by removing the second attachment. Open for authentication (section 12); `spoofed_irq_pulse` shows the refused unmask. |
-| 5. Successful reset retry does not restore `hw_started` | Fixed: set only after a successful reset and start; teardown stops a mapped core regardless. Test: `fi_reset_retry`. |
-| 6. Bus-off released by any non-bus-off value; unbounded abort | Fixed: hold until error active, aborts bounded at 20 ms. Tests: `fi_busoff_latch`, `fi_busoff_stuck_abort`. |
-| 7. FI state leaks across OFF and reset; FI does not prove wire-level delay | Fixed: OFF and reset clear every overlay (`fi_state_clear`); section 8 says which tests show bookkeeping only. |
-| 8. Supervisor trusts the pathname, waits forever, ignores spawn failures | Fixed: right server pid plus a bounded `GET_INFO`, kill and restart on timeout, spawn failures counted. Test: `supervisor_readiness`. Partly: a server that registers the path and never answers is bounded by the timer in code but not tested. |
-| Normal build must refuse FI devctls | Fixed. Test: `fi_rejected_normal`. |
-| Q3: detach-and-reuse pulse scheme | Removed (defect 3). |
-
-v0.1b:
-
-| Item | Status |
-|---|---|
-| Stopped-controller rearm: a pulse after a failed reset re-enabled the output | Fixed: output left off while the core is stopped, the pulse still unmasked. Test: `fi_reset_storm` (fails with the check removed). |
-| Reader retry: a return that woke nobody was dropped and RBNEI released | Fixed: notification kept for up to 8 pulses, then a counted, logged drop of the queued frames. Test: `fi_reader_nowake`. |
-| Abort deadline relied on traffic or the fault-injection tick | Fixed: bounded wait for the aborts at the point of bus-off. Test: `fi_busoff_abort_notick` (no ticker, no traffic). |
-| Devctl starvation under sustained higher-priority interrupts | Open: devctl latency has no upper bound (sections 3.2, 12); sustained ingress beyond the tested loads not tested. |
-| Supervisor probe could hang on a server that never replies | Fixed: probe in a forked child, abandoned at 200 ms. Test: `supervisor_hang`. |
-| A logged copy retry could leave an old binary in place | Fixed: gate and suite compare the md5 on the target with the build after every copy. |
-| Interrupt pulse authentication | Open, as before (section 12). |
+- ARM register access ordering is not reviewed, and the aarch64le build has not run (section 11).
+- Interrupt pulses are not authenticated (section 11); `spoofed_irq_pulse` shows the refused unmask.
+- Devctl latency has no upper bound (sections 3.2, 11), and bus-off and a `SET_TIMING` restart wait for TXT buffer aborts on libcan's thread (sections 5 and 8).
+- No test overruns the RX FIFO, so the DOR-before-DOI order is in the code but untested.
+- The unwinding of a partial start-up is not exercised by a test.
+- Hardware acceptance filters (section 4.1) and an explicit interrupt thread (section 3.4) are not done.
