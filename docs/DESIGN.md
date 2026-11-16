@@ -77,6 +77,7 @@ Device numbering follows QNX's convention: RX mailboxes first, TX numbered after
 | `probe/ctucan_probe.c` | Identification probe |
 | `scripts/qemu-can.sh`, `host-vcan.sh` | QEMU launch with CAN, host vcan0 |
 | `scripts/gate-test.sh`, `test-suite.sh`, `tests/ctutest.py` | Quick check, full suite runner, end-to-end tests |
+| `tests/host/` | Unit tests of the hardware layer on a fake core, host compiler, no QNX (`docs/TESTS.md`) |
 | `codelab/` | The codelab, its dry-run record and the scripts that ran it |
 
 ### 2.3 Startup

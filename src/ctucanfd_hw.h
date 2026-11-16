@@ -52,7 +52,8 @@ static inline void ctucan_raw_wr(const ctucan_hw_t *hw, uint32_t off, uint32_t v
     *(volatile uint32_t *)(hw->base + off) = val;
 }
 
-#ifdef CTUCAN_FI
+/* The fault injector and the host unit tests (tests/host) supply these two. */
+#if defined(CTUCAN_FI) || defined(CTUCAN_HW_EXTERN_IO)
 uint32_t ctucan_rd(const ctucan_hw_t *hw, uint32_t off);
 void     ctucan_wr(const ctucan_hw_t *hw, uint32_t off, uint32_t val);
 #else

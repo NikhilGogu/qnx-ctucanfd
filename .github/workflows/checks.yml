@@ -1,4 +1,5 @@
-# Static checks that run on a hosted Ubuntu runner without QNX.
+# Static checks and host unit tests that run on a hosted Ubuntu runner
+# without QNX.
 #
 # The driver build and the 41 end-to-end tests need a QNX SDP 8.0 and QEMU
 # with the ctucan_pci board. They are not run on hosted runners. The results
@@ -37,6 +38,20 @@ jobs:
         run: |
           shellcheck --severity=warning --exclude=SC1090,SC2034,SC2088 \
             scripts/*.sh codelab/dryrun/*.sh
+
+  # The hardware layer (src/ctucanfd_hw.c) built with the host compiler
+  # against a fake core: DLC tables, bit timing, TXT buffer encoding, RX
+  # format-word checks, start and reset sequences (docs/TESTS.md).
+  host-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Host unit tests (gcc, ASan and UBSan)
+        run: make -C tests/host run
+
+      - name: Host unit tests (clang)
+        run: make -C tests/host clean run CC=clang
 
   links:
     runs-on: ubuntu-latest

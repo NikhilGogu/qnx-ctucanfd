@@ -15,6 +15,22 @@ The setup is in the README. This is what the tester measured.
 
 The tester checks every telemetry frame from node 1 (length, CRC-8, sequence), sends a 64-byte CAN FD echo request on 0x1E0 every 10 ms, which ecu-sim sends back unchanged on 0x1E8, and times each round trip on its own clock; once a second it sends the diagnostic request. Measured (`two_nodes`, 30 s, `docs/test-results.txt`): 3094 of 3094 telemetry frames on node 2 with sequence and CRC clean, also on `vcan0`; 3000 of 3000 echo round trips with every byte checked on node 2 and on `vcan0`, round trip on node 2's clock min 2.751 ms, median 3.271, 99th percentile 3.681, max 4.162; of that, node 1 between request and reply on `vcan0` median 1.700 ms, 99th percentile 1.998; 30 of 30 diagnostic requests answered.
 
+## Host unit tests
+
+`tests/host/` builds the hardware layer, `src/ctucanfd_hw.c`, with the host's C compiler and runs it against a fake core (`tests/host/fake_core.c`), with AddressSanitizer and UndefinedBehaviorSanitizer. They need no QNX SDP and no QEMU, and the `checks` workflow runs them with gcc and clang on every push and pull request:
+
+```
+make -C tests/host run          # SAN= to build without the sanitizers
+```
+
+| Test | What it checks |
+|---|---|
+| `test_dlc_timing` | DLC to length and back for every CAN FD size; bit timing at the start-up defaults, exact bit rate, valid fields and sample point within half a time quantum over a grid of clocks, rates and sample points; refused timings; BTR field packing |
+| `test_frames` | TXT buffer contents for classic, CAN FD (DLC rounding, zero padding, BRS) and remote frames; refused frames write nothing; TX_COMMAND and the rotating priorities; RX pops with FDF, BRS and ESI; QEMU's and the datasheet's word counts for remote frames; every bad format word refused after reading only that word; every length and id format written to a TXT buffer and read back from the FIFO unchanged |
+| `test_core` | Identification, soft reset and its timeout, the register writes of start and stop and their order (interrupt output off first and on last, timing before the core joins the bus) |
+
+The fake core models only what the hardware layer relies on, as `src/ctucanfd_regs.h` and `docs/DESIGN.md` describe it. It is not a model of the silicon or of QEMU. `tests/host/shim/sys/can_dcmd.h` defines the few `CAN_MSG` names the hardware layer uses so it builds without the SDP; it is our own stand-in, not QNX's header. Everything that needs libcan, the PCI server or interrupts is covered by the end-to-end suite below.
+
 ## The suite and its results
 
 `scripts/test-suite.sh tc vcan0 [tc2]` builds both variants and runs `scripts/gate-test.sh` and every test in `scripts/tests/ctutest.py` against the QEMU target, keeping the output in `build/test-results-*.txt`. With a second target on the same interface (`tc2`) it also runs the two-node test; without one that test is skipped. The scripts reach the target through `~/bin/qtarget NAME ssh|put`; set `QTARGET=scripts/qtarget-lite.sh` to use the minimal helper in this repository, which finds the target in `~/targets/NAME` with `mkqnximage --getip`. The host side uses a raw SocketCAN socket and `candump -L`, and checks complete frames: identifier, format, length, every payload byte including padding, and sequence numbers.
