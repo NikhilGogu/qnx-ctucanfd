@@ -30,6 +30,14 @@ unsigned ctucan_len2dlc(unsigned len)
     return 15;
 }
 
+ctucan_flags_t ctucan_tx_flags(bool fd_mode, bool fd_always, bool brs, unsigned len)
+{
+    ctucan_flags_t f = { .fdf = fd_mode && (fd_always || len > CAN_MSG_DATA_MAX_CAN) };
+
+    f.brs = f.fdf && brs;
+    return f;
+}
+
 int ctucan_hw_identify(const ctucan_hw_t *hw, unsigned *major, unsigned *minor)
 {
     uint32_t v = ctucan_rd(hw, CTUCAN_DEVICE_ID);

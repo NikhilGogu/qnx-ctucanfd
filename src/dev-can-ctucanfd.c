@@ -47,6 +47,7 @@
 
 _Static_assert(sizeof(ctucan_xstats_t) <= sizeof(CAN_DCMD_DATA),
                "private replies must fit where the standard CAN devctl replies go");
+_Static_assert(sizeof(ctucan_fdstats_t) <= sizeof(CAN_DCMD_DATA), "FD statistics reply too large");
 
 typedef struct drv drv_t;
 
@@ -111,6 +112,7 @@ struct drv {
     uint32_t         ts_offset;     /* timestamps: ctucanfd_time.h */
     CAN_DEVCTL_STATS stats;
     ctucan_xstats_t  x;
+    ctucan_fdstats_t fdx;
 
     mbox_t rx[MAX_RX_DEVS];
     mbox_t tx[MAX_TX_DEVS];
@@ -208,8 +210,8 @@ static void tx_kick(drv_t *d)
             m.ext.is_extended_mid = t->ext;
             m.ext.is_remote_frame = 0;
         }
-        bool fdf = d->fd && (d->fd_always || m.len > CAN_MSG_DATA_MAX_CAN);
-        int rc = ctucan_hw_txt_write(&d->hw, b, &m, fdf, fdf && d->brs);
+        ctucan_flags_t f = ctucan_tx_flags(d->fd, d->fd_always, d->brs, m.len);
+        int rc = ctucan_hw_txt_write(&d->hw, b, &m, f.fdf, f.brs);
         if (rc != EOK) {
             d->x.tx_failed++;   /* refused by the hardware layer (format) */
             can_slogf(SLOG2_ERROR, DRV_NAME ": tx%u: dropped mid 0x%08x len %u%s: %s", t->cdev.dev_unit,
@@ -225,6 +227,12 @@ static void tx_kick(drv_t *d)
         s->late = false;
         d->txb_head++;
         d->x.tx_started++;
+        if (f.fdf) {
+            d->fdx.tx_fd++;
+            d->fdx.tx_brs += f.brs;
+        } else {
+            d->fdx.tx_classic++;
+        }
         ready |= 1u << b;
         if (tx_inflight(d) > d->x.tx_max_inflight) {
             d->x.tx_max_inflight = tx_inflight(d);
@@ -417,6 +425,13 @@ static unsigned rx_drain(drv_t *d, unsigned budget)
             break;
         }
         n++;
+        if (fl.fdf) {
+            d->fdx.rx_fd++;
+            d->fdx.rx_brs += fl.brs;
+            d->fdx.rx_esi += fl.esi;
+        } else {
+            d->fdx.rx_classic++;
+        }
         m.ext.timestamp = now_us(d);
         d->stats.received_frames++;
         rx_deliver(d, &m);
@@ -960,6 +975,10 @@ static int cb_devctl(CANDEV *cdev, io_devctl_t *msg)
 #endif
         memcpy(out, &d->x, sizeof(d->x));
         rc = sizeof(d->x);
+        break;
+    case CTUCAN_DEVCTL_GET_FDSTATS:
+        memcpy(out, &d->fdx, sizeof(d->fdx));
+        rc = sizeof(d->fdx);
         break;
     case CTUCAN_DEVCTL_RECOVER:
         /* manual bus-off recovery when -a is not set; TX resumes once FAULT_STATE reads error active */

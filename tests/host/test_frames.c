@@ -157,6 +157,28 @@ static void test_txt_cmd_and_prio(void)
     }
 }
 
+/* The TX format policy: every combination of -C, -A and -S over every length. */
+static void test_tx_flags(void)
+{
+    for (int fd_mode = 0; fd_mode < 2; fd_mode++) {
+        for (int always = 0; always < 2; always++) {
+            for (int brs = 0; brs < 2; brs++) {
+                for (unsigned len = 0; len <= 64; len++) {
+                    ctucan_flags_t f = ctucan_tx_flags(fd_mode, always, brs, len);
+                    bool fdf = fd_mode && (always || len > 8);
+                    CHECK(f.fdf == fdf, "fd %d -A %d len %u: fdf %d", fd_mode, always, len, f.fdf);
+                    CHECK(f.brs == (fdf && brs), "fd %d -A %d brs %d len %u: brs %d", fd_mode, always, brs, len,
+                          f.brs);
+                    CHECK(!f.esi, "ESI is never set on TX");
+                }
+            }
+        }
+    }
+    /* the defaults: CAN FD on, BRS on, -A off */
+    CHECK(!ctucan_tx_flags(true, false, true, 8).fdf, "8 bytes go out as classic CAN");
+    CHECK(ctucan_tx_flags(true, false, true, 9).brs, "9 bytes go out as CAN FD with BRS");
+}
+
 /* Builds the FIFO words of one frame: format word, id, two timestamp words, data. */
 static unsigned rx_words(uint32_t *w, uint32_t ffw_flags, unsigned dlc, unsigned rwcnt, uint32_t idw,
                          const uint8_t *data, unsigned dwords)
@@ -323,6 +345,7 @@ int main(void)
     test_tx_remote();
     test_tx_refused();
     test_txt_cmd_and_prio();
+    test_tx_flags();
     test_rx_frames();
     test_rx_remote();
     test_rx_refused();

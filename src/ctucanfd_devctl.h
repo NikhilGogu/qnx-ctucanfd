@@ -61,6 +61,18 @@ typedef struct {
 #define CTUCAN_FI_F_REPORT1     4u  /* one RX mailbox return per pulse */
 #define CTUCAN_FI_F_NOWAKE      8u  /* returned RX mailboxes are not handed to libcan: no reader wakes */
 
+/* Frames by format, counted by the driver from the RX format word and from
+ * the format it chose for TX. libcan's CAN_MSG has no field for these flags. */
+typedef struct {
+    uint32_t rx_classic;        /* received classic CAN frames */
+    uint32_t rx_fd;             /* received CAN FD frames (FDF) */
+    uint32_t rx_brs;            /* of those, with bit rate switch */
+    uint32_t rx_esi;            /* of those, with the error state indicator set */
+    uint32_t tx_classic;        /* frames put in a TXT buffer as classic CAN */
+    uint32_t tx_fd;             /* as CAN FD */
+    uint32_t tx_brs;            /* as CAN FD with bit rate switch */
+} ctucan_fdstats_t;
+
 #define CTUCAN_DCMD_CODE        200
 #define CTUCAN_DEVCTL_GET_XSTATS (__DIOF(_DCMD_MISC, CTUCAN_DCMD_CODE + 0, ctucan_xstats_t))
 #define CTUCAN_DEVCTL_RECOVER    (__DION(_DCMD_MISC, CTUCAN_DCMD_CODE + 1))
@@ -70,5 +82,6 @@ typedef struct {
 /* Microseconds as a 64-bit value that does not wrap; its low 32 bits are the
  * 32-bit timestamp of frames and CAN_DEVCTL_GET_TIMESTAMP (src/ctucanfd_time.h) */
 #define CTUCAN_DEVCTL_GET_TIMESTAMP64 (__DIOF(_DCMD_MISC, CTUCAN_DCMD_CODE + 4, uint64_t))
+#define CTUCAN_DEVCTL_GET_FDSTATS (__DIOF(_DCMD_MISC, CTUCAN_DCMD_CODE + 5, ctucan_fdstats_t))
 
 #endif
