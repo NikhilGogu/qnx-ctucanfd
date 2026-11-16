@@ -82,6 +82,10 @@ void ctucan_hw_start(const ctucan_hw_t *hw, const ctucan_hw_cfg_t *cfg, uint32_t
     if (cfg->non_iso) {
         mode |= SET_NISOFD;
     }
+    if (cfg->retr_limit) {
+        /* without it the core retransmits a frame nobody acknowledges for ever */
+        mode |= SET_RTRLE | (uint32_t)(cfg->retr_max & SET_RTRTH_MAX) << SET_RTRTH_SHIFT;
+    }
     ctucan_wr(hw, CTUCAN_MODE, mode);
     ctucan_wr(hw, CTUCAN_INT_ENA_SET, int_ena);
 }

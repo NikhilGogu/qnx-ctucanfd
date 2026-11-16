@@ -34,6 +34,8 @@ typedef struct {
     bool non_iso;               /* SETTINGS.NISOFD */
     bool loopback;              /* SETTINGS.ILBP */
     bool listen_only;           /* MODE.BMM */
+    bool retr_limit;            /* SETTINGS.RTRLE */
+    uint8_t retr_max;           /* SETTINGS.RTRTH, 0..15, used with retr_limit */
     ctucan_bt_t nominal;
     ctucan_bt_t data;
 } ctucan_hw_cfg_t;

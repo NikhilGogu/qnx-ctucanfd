@@ -72,7 +72,7 @@ struct drv {
     /* options */
     unsigned pci_index, core, unit, nrx, ntx, msgq, waitq, ntxb;
     int      verbosity;
-    bool     fd, brs, fd_always, autobus, ext;
+    bool     fd, brs, fd_always, autobus, ext, no_bei;
     uint32_t clk_hz, bitrate, dbitrate;
     unsigned sp, dsp;
 
@@ -1000,6 +1000,8 @@ static void usage(void)
            "  -A        send every frame as CAN FD (default: only frames over 8 bytes)\n"
            "  -S        no bit rate switch in CAN FD frames\n"
            "  -l        internal loopback   -L  listen only   -a  automatic bus-off recovery\n"
+           "  -R n      at most n retransmissions per frame, 0 to 15 (default: no limit)\n"
+           "  -E        no bus error interrupt (errors not counted by type)\n"
            "  -v        more verbose slog2 output (repeat)\n",
            CTUCAN_PCI_VENDOR, CTUCAN_PCI_DEVICE);
 }
@@ -1007,6 +1009,7 @@ static void usage(void)
 static int parse_args(drv_t *d, int argc, char *argv[])
 {
     int c;
+    unsigned long retr = 0;
 
     d->nrx = d->ntx = 1;
     d->msgq = 64;
@@ -1020,7 +1023,7 @@ static int parse_args(drv_t *d, int argc, char *argv[])
     d->sp = 875;
     d->dsp = 750;
     d->unit = 0;
-    while ((c = getopt(argc, argv, "i:c:u:r:t:q:w:T:b:d:k:xCASlLavh")) != -1) {
+    while ((c = getopt(argc, argv, "i:c:u:r:t:q:w:T:b:d:k:R:xCASlLaEvh")) != -1) {
         switch (c) {
         case 'i': d->pci_index = strtoul(optarg, NULL, 0); break;
         case 'c': d->core = strtoul(optarg, NULL, 0); break;
@@ -1040,6 +1043,11 @@ static int parse_args(drv_t *d, int argc, char *argv[])
         case 'l': d->cfg.loopback = true; break;
         case 'L': d->cfg.listen_only = true; break;
         case 'a': d->autobus = true; break;
+        case 'E': d->no_bei = true; break;
+        case 'R':
+            retr = strtoul(optarg, NULL, 0);
+            d->cfg.retr_limit = true;
+            break;
         case 'v': d->verbosity++; break;
         default: usage(); return EINVAL;
         }
@@ -1049,6 +1057,11 @@ static int parse_args(drv_t *d, int argc, char *argv[])
         fprintf(stderr, DRV_NAME ": bad mailbox, queue or TXT buffer count\n");
         return EINVAL;
     }
+    if (retr > SET_RTRTH_MAX) {
+        fprintf(stderr, DRV_NAME ": -R takes 0 to %u retransmissions\n", SET_RTRTH_MAX);
+        return EINVAL;
+    }
+    d->cfg.retr_max = (uint8_t)retr;
     if (d->unit == 0) {
         d->unit = d->core + 1;
     }
@@ -1266,7 +1279,9 @@ int main(int argc, char *argv[])
         fprintf(stderr, DRV_NAME ": core did not come out of reset\n");
         goto fail;
     }
-    d->int_ena = INT_RBNEI | INT_DOI | INT_TXBHCI | INT_EWLI | INT_FCSI | INT_BEI;
+    /* With no node to acknowledge, every retransmission is a bus error; -E
+     * keeps those off libcan's thread. Fault confinement still interrupts. */
+    d->int_ena = INT_RBNEI | INT_DOI | INT_TXBHCI | INT_EWLI | INT_FCSI | (d->no_bei ? 0 : INT_BEI);
     d->budget = RX_BUDGET;
     d->report_budget = REPORT_BUDGET;
 
