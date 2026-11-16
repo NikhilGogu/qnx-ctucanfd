@@ -10,6 +10,15 @@ Status (v0.2.0): tested in QEMU 6.2 with QNX SDP 8.0 on x86_64, also with two QN
 
 The codelab's source is in [codelab/](codelab/qnx-canfd-qemu.md), and [codelab/DRYRUN.md](codelab/DRYRUN.md) records how it was checked.
 
+## For judges
+
+| Criterion | Where to look |
+|---|---|
+| Technical implementation | `src/dev-can-ctucanfd.c`: libcan callbacks `cb_devctl` and `cb_event`, bounded interrupt service in `service()` and `finish_pulse()`, bus-off without blocking in `enter_busoff()` and `quiesce_check()`. `src/ctucanfd_hw.c`: the register layer. The fault-injection build (`make FI=1`, `src/ctucanfd_fi.c`). The recorded run in [docs/test-results.txt](docs/test-results.txt). Host unit tests in `tests/host/`, run by the `checks` workflow |
+| Design | The Quickstart below, `scripts/quickstart.sh` and the codelab. `ctucan-supervisor` restarts the driver. The stock `canctl` works ([docs/DESIGN.md](docs/DESIGN.md), section 7) |
+| Potential impact | CAN FD application code for QNX tested with no CAN bench: `tools/ecu-sim.c` and `canfd-test tester` are the example application and its tester, and `.github/workflows/qemu-e2e.yml` runs the suite on a self-hosted runner with JUnit output |
+| Innovation | Bounded interrupt batches with one `InterruptUnmask()` per pulse, and the interrupt output toggle that closed a lost-interrupt race ([docs/DESIGN.md](docs/DESIGN.md), sections 3.2 and 3.3). Bus-off handled without sleeping on libcan's thread (section 8). Recovery by restarting a plain process under a supervisor |
+
 ## What you see
 
 Start the driver in QEMU, send a 64-byte CAN FD frame from QNX, and watch it on the host with `candump`. The output is from the codelab, trimmed there with `...`.
@@ -50,13 +59,20 @@ scp build/x86_64/* root@<target>:/tmp/
 
 The full test suite (build, gate test and 41 tests) runs with `scripts/test-suite.sh tc vcan0 [tc2]`. It calls `~/bin/qtarget`; if you do not have that helper, run it as `QTARGET=scripts/qtarget-lite.sh scripts/test-suite.sh tc vcan0`, which uses the minimal helper in this repository.
 
-## How it uses QNX
+## QNX technologies used
 
-- **Resource manager on the CAN DDK.** `src/dev-can-ctucanfd.c` registers its callbacks with libcan (`can_resmgr_init`, `can_resmgr_init_device`, `can_resmgr_create_device`, `can_resmgr_start`), which runs the QNX resource manager loop. Clients use plain `open`, `read`, `write` and `devctl` on `/dev/can1/rx0` and `/dev/can1/tx1`, and the stock `canctl` works.
-- **Standard CAN devctls.** `cb_devctl` answers the `CAN_DEVCTL_*` commands, for example `GET_INFO`, `GET_STATS`, `SET_MID`, `SET_TIMING`, `WRITE_CANMSG_EXT` and `READ_CANMSG_EXT`. Driver-specific devctls are in `src/ctucanfd_devctl.h`.
-- **Interrupts as pulses, in bounded batches.** `can_resmgr_attach_intr()` ties the IRQ to one pulse code, and libcan calls the driver's `event_handler` on the resource manager thread, so the driver state needs no locks. Each pulse moves at most 64 frames from the RX FIFO, makes at most 8 passes over the interrupt status and returns at most 64 mailboxes to libcan (`RX_BUDGET`, `PASS_LIMIT`, `REPORT_BUDGET`), then calls `InterruptUnmask()` once. Work left over keeps an interrupt bit pending, so the next pulse continues it. Between pulses libcan's thread is back in its message loop, and which waiting message it takes first depends on the priorities of the pulse and the client, so devctl latency has no upper bound (Limitations). See `docs/DESIGN.md`, section 3.
-- **PCI attach.** `pci_device_find`, `pci_device_attach` (exclusive owner), `pci_device_read_ba` and `pci_device_read_irq` find the board; the core's registers are mapped with `mmap_device_memory` and `PROT_NOCACHE`.
-- **Around the driver.** `tools/ecu-sim.c` sends its telemetry from a `SCHED_FIFO` thread with absolute `clock_nanosleep` deadlines. `tools/ctucan-supervisor.c` starts the driver with `posix_spawn` and counts it ready only when the process it started answers a `CAN_DEVCTL_GET_INFO` message. The driver logs to slog2.
+| QNX technology | In this repository | Tests that use it |
+|---|---|---|
+| Resource manager on the CAN DDK | `src/dev-can-ctucanfd.c` registers its callbacks with libcan (`can_resmgr_init`, `can_resmgr_init_device`, `can_resmgr_create_device`, `can_resmgr_start`). Clients use `open`, `read`, `write` and `devctl` on `/dev/can1/rx0` and `/dev/can1/tx1`, and the stock `canctl` works | `tx_lengths`, `rx_lengths`, `readers`, `writers` |
+| Devctls | `cb_devctl` answers the standard `CAN_DEVCTL_*` commands, for example `GET_INFO`, `GET_STATS`, `SET_MID` and `SET_TIMING`. Driver-specific devctls are in `src/ctucanfd_devctl.h` | `devctl_sizes`, `timing`, `timestamp64`, `fd_flag_counts` |
+| Interrupts delivered as pulses | `can_resmgr_attach_intr()` ties the IRQ to one pulse code. `cb_event` serves each pulse in a bounded batch (`RX_BUDGET`, `PASS_LIMIT`, `REPORT_BUDGET`) and ends it with one `InterruptUnmask()` in `finish_pulse()` | `burst_batches`, `fi_batches`, `spoofed_irq_pulse`, `fi_reset_storm` |
+| Message passing between threads and processes | At bus-off the driver's deadline thread sends a devctl to the driver's own device instead of sleeping on libcan's thread. `tools/ctucan-supervisor.c` learns of deaths from `procmgr_event_notify()`, checks the server pid with `ConnectServerInfo()` and counts the driver ready once it answers `CAN_DEVCTL_GET_INFO` | `fi_busoff_devctl_during_quiesce`, `supervisor_readiness`, `supervisor_hang` |
+| The driver is an ordinary process | It is killed under load while the kernel, clients and shell keep running, and the supervisor starts it again with `posix_spawn()` | `restart_under_load`, `sigterm` |
+| Real-time scheduling | `tools/ecu-sim.c` sends telemetry from a `SCHED_FIFO` thread with absolute `clock_nanosleep()` deadlines | `ecu_sim`, `two_nodes` |
+| PCI server and device memory | `pci_device_find`, `pci_device_attach` (exclusive owner), `pci_device_read_ba` and `pci_device_read_irq` find the board. The core's registers are mapped with `mmap_device_memory()` and `PROT_NOCACHE`, after `ThreadCtl()` grants I/O privileges | every test: the driver does not start without them |
+| slog2 | After start-up the driver logs only to slog2 | `sigterm` finds the stop line there |
+
+libcan runs every callback on one thread, so the driver state needs no locks. Between pulses that thread is back in its message loop. Which waiting message it takes first depends on the priorities of the pulse and the client, so devctl latency has no upper bound (Limitations). `docs/DESIGN.md`, section 3, has the details.
 
 ## Why it matters
 
