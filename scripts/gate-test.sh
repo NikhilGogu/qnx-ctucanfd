@@ -5,7 +5,7 @@
 # the host and compares complete frames.
 set -uo pipefail
 TGT=${1:-tc}; IF=${2:-vcan0}; N=${BURST:-400}
-Q=${QTARGET:-~/bin/qtarget}
+Q=${QTARGET:-$(cd "$(dirname "$0")" && pwd)/qtarget-lite.sh}
 B=$(cd "$(dirname "$0")/.." && pwd)/build/x86_64
 fail() { echo "FAIL: $*"; exit 1; }
 
