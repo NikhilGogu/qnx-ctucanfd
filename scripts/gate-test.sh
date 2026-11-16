@@ -9,6 +9,18 @@ Q=${QTARGET:-~/bin/qtarget}
 B=$(cd "$(dirname "$0")/.." && pwd)/build/x86_64
 fail() { echo "FAIL: $*"; exit 1; }
 
+# A failed check exits at once. Whatever this run started is stopped here:
+# the host's candump, its temp file and the receivers on the target, which
+# would otherwise take the next run's frames. Each step clears its marker
+# when it is done with it, so a clean run leaves nothing for the trap.
+CD=; LOG=; RX=0
+cleanup() {
+    if [ -n "$CD" ]; then kill "$CD" 2>/dev/null; fi
+    if [ -n "$LOG" ]; then rm -f "$LOG"; fi
+    if [ "$RX" = 1 ]; then $Q "$TGT" ssh "slay -f canfd-test >/dev/null 2>&1; true" >/dev/null 2>&1; fi
+}
+trap cleanup EXIT
+
 # A running binary cannot be overwritten (EBUSY): stop the old driver (the
 # supervisor first, or it starts it again) and retry while it is exiting.
 $Q "$TGT" ssh "slay -f -s KILL ctucan-supervisor >/dev/null 2>&1; slay -f dev-can-ctucanfd canfd-test >/dev/null 2>&1; true"
@@ -33,13 +45,14 @@ LOG=$(mktemp); timeout 10 candump -L -n 2 "$IF" > "$LOG" 2>&1 & CD=$!
 sleep 0.5
 $Q "$TGT" ssh "/tmp/canfd-test send /dev/can1/tx1 123 64 && /tmp/canfd-test send /dev/can1/tx1 7DF 8 0201050000000000" \
     >/dev/null || fail "send"
-wait $CD; cat "$LOG"
+wait $CD; CD=; cat "$LOG"
 P64=$(printf '%02X' $(seq 0 63))
 grep -Eq " 123##[13579BDF]$P64\$" "$LOG" || fail "64-byte CAN FD frame with BRS not seen complete on $IF"
 grep -q " 7DF#0201050000000000\$" "$LOG" || fail "classic frame not seen complete on $IF"
-rm -f "$LOG"
+rm -f "$LOG"; LOG=
 
 echo "== host -> QNX (/dev/can1/rx0)"
+RX=1
 $Q "$TGT" ssh "rm -f /tmp/rx.log; (/tmp/canfd-test recv /dev/can1/rx0 2 >/tmp/rx.log 2>&1 &)"
 sleep 0.5
 cansend "$IF" "456##1$(printf '%02X' $(seq 192 255))"
@@ -67,6 +80,7 @@ for q in range(int(sys.argv[2])):
 PY
 sleep 1
 R=$($Q "$TGT" ssh "cat /tmp/burst.log; /tmp/canfd-test info /dev/can1/rx0 | grep stats; slay -f canfd-test >/dev/null 2>&1")
+RX=0
 echo "$R"
 echo "$R" | grep -q "seqrecv: got $N of $N, bad 0, missing 0, out_of_order 0" || fail "burst"
 echo "PASS: 64-byte CAN FD both ways, classic and 29-bit ids, $N/$N burst frames checked byte for byte"
