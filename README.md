@@ -8,7 +8,7 @@ Run your CAN FD application on QNX 8.0 in QEMU, with no board.
 
 Status (v0.2.0): tested in QEMU 6.2 with QNX SDP 8.0 on x86_64, also with two QNX nodes on one virtual CAN bus. 41 of 41 end-to-end tests pass ([docs/test-results.txt](docs/test-results.txt)). It compiles and links for aarch64le. It has not run on ARM or on CTU CAN FD silicon.
 
-The codelab takes about 45 minutes (source in [codelab/](codelab/qnx-canfd-qemu.md), dry runs in [codelab/DRYRUN.md](codelab/DRYRUN.md)).
+The codelab's source is in [codelab/](codelab/qnx-canfd-qemu.md), and [codelab/DRYRUN.md](codelab/DRYRUN.md) records how it was checked.
 
 ## What you see
 
@@ -207,7 +207,7 @@ What the tests cover, with the numbers: [docs/TESTS.md](docs/TESTS.md). In short
 
 ## Codelab
 
-`codelab/qnx-canfd-qemu.md` is a QNX codelab in claat Markdown, about 45 minutes: host vcan, QEMU with `ctucan_pci`, building and starting the driver, first frames, ecu-sim and a diagnostic request, a kill and restart under the supervisor, and two nodes. `codelab/DRYRUN.md` records nine runs of it from the top on the build box; the last one needed no change.
+`codelab/qnx-canfd-qemu.md` is a QNX codelab in claat Markdown: host vcan, QEMU with `ctucan_pci`, building and starting the driver, first frames, ecu-sim and a diagnostic request, a kill and restart under the supervisor, and two nodes. `codelab/DRYRUN.md` records nine runs of it from the top; the last one needed no change to the text.
 
 ## Licence
 

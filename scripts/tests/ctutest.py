@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """End-to-end tests for dev-can-ctucanfd.
 
-Runs on the build box against a QEMU target started with scripts/qemu-can.sh
+Runs on the Linux host against a QEMU target started with scripts/qemu-can.sh
 (ctucan_pci bridged to a host vcan interface). The host side uses a raw
 SocketCAN socket, so every frame is checked in full: identifier, format,
 length, every payload byte including padding, and sequence numbers.
@@ -1067,7 +1067,7 @@ def t_fi_tx_order(t, bus):
 
 
 def t_fi_tx_order_fixed(t, bus):
-    """Negative control: stage-one fixed priorities (buffer n gets n + 1) put the same frames out of order."""
+    """Negative control: the first version's fixed priorities (buffer n gets n + 1) put the same frames out of order."""
     got, x = fi_order_run(t, bus, 0x2F1, 2)
     n = order_errors(got)
     check(len(got) == 1000 and n > 0 and x["tx_batches"] > 0, f"{len(got)} frames, {n} order breaks, {x}")

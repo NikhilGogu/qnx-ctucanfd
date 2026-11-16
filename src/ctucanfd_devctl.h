@@ -57,7 +57,7 @@ typedef struct {
     uint32_t flags;
 } ctucan_fi_req_t;
 
-#define CTUCAN_FI_F_FIXEDPRIO   2u  /* stage-one fixed TXT priorities (buffer n gets n + 1): negative control */
+#define CTUCAN_FI_F_FIXEDPRIO   2u  /* first version's fixed TXT priorities (buffer n gets n + 1): negative control */
 #define CTUCAN_FI_F_REPORT1     4u  /* one RX mailbox return per pulse */
 #define CTUCAN_FI_F_NOWAKE      8u  /* returned RX mailboxes are not handed to libcan: no reader wakes */
 
