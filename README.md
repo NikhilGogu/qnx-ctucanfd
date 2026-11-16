@@ -1,15 +1,70 @@
 # dev-can-ctucanfd: CAN FD for QNX 8.0, tested in QEMU
 
-`dev-can-ctucanfd` is a native QNX 8.0 driver for the CTU CAN FD IP core, built on the QNX CAN DDK (`libcan`). QEMU emulates a PCI board carrying this core (`ctucan_pci`), so CAN and CAN FD software for QNX can be developed and tested in a virtual machine, talking to Linux SocketCAN tools (`candump`, `cansend`) on the host. The driver gives QNX applications the usual libcan devices, `/dev/can1/rx0` and `/dev/can1/tx1`, with 64-byte CAN FD payloads.
+Run your CAN FD application on QNX 8.0 in QEMU, with no board.
 
-The driver is an ordinary QNX process; `ctucan-supervisor` starts it again when it dies. Telemetry gaps measured on the host's `vcan0` after `slay -s KILL dev-can-ctucanfd` in QEMU:
+[Demo video](https://youtu.be/cFywX90Fi-M) | [Codelab: Test CAN FD software on QNX 8.0 in QEMU, no hardware needed](https://nikhil-qnx-codelabs.pages.dev/qnx-canfd-qemu/) | [Design](docs/DESIGN.md) | [Test results](docs/test-results.txt)
 
-- ecu-sim telemetry every 1 ms, the host sending 500 frames/s into QNX, three kills (test `restart_under_load`): 9.0, 6.5 and 8.4 ms.
-- ecu-sim telemetry every 10 ms, no other traffic, one kill (codelab step 9): 20.3 ms in the run the codelab shows and 19.8 ms in its last dry run; the one frame due while no driver ran was skipped.
+`dev-can-ctucanfd` is a native QNX 8.0 driver for the CTU CAN FD IP core, built on the QNX CAN DDK (`libcan`). QEMU emulates a PCI board carrying this core (`ctucan_pci`), so CAN and CAN FD software for QNX can be developed and tested in a virtual machine, talking to Linux SocketCAN tools (`candump`, `cansend`) on the host. The driver gives QNX applications the usual libcan devices, `/dev/can1/rx0` and `/dev/can1/tx1`, with 64-byte CAN FD payloads. It is an ordinary QNX process; `ctucan-supervisor` starts it again when it dies (restart gaps: [docs/TESTS.md](docs/TESTS.md)).
 
-Status (v0.2.0): tested in QEMU 6.2 with QNX SDP 8.0 on x86_64, also with two QNX nodes on one virtual CAN bus. It compiles and links for aarch64le. It has not run on ARM or on CTU CAN FD silicon.
+Status (v0.2.0): tested in QEMU 6.2 with QNX SDP 8.0 on x86_64, also with two QNX nodes on one virtual CAN bus. 41 of 41 end-to-end tests pass ([docs/test-results.txt](docs/test-results.txt)). It compiles and links for aarch64le. It has not run on ARM or on CTU CAN FD silicon.
 
-Tutorial: the codelab [Test CAN FD software on QNX 8.0 in QEMU, no hardware needed](https://nikhil-qnx-codelabs.pages.dev/qnx-canfd-qemu/) takes about 45 minutes (source in [codelab/](codelab/qnx-canfd-qemu.md), dry runs in [codelab/DRYRUN.md](codelab/DRYRUN.md)).
+The codelab takes about 45 minutes (source in [codelab/](codelab/qnx-canfd-qemu.md), dry runs in [codelab/DRYRUN.md](codelab/DRYRUN.md)).
+
+## What you see
+
+Start the driver in QEMU, send a 64-byte CAN FD frame from QNX, and watch it on the host with `candump`. The output is from the codelab, trimmed there with `...`.
+
+```
+# QNX, in QEMU
+# /tmp/dev-can-ctucanfd
+dev-can-ctucanfd: B0:D5:F0 BAR1 0xfeb90000 core 0 of 2, irq 10
+dev-can-ctucanfd: CTU CAN FD 2.2, /dev/can1/rx0..rx0 tx1..tx1, CAN FD, 500000 bit/s (brp 4 tq 50), data 2000000 bit/s (brp 1 tq 50) BRS, 4 TXT buffer(s)
+# /tmp/canfd-test send /dev/can1/tx1 123 64
+
+# host
+$ candump -t d -x vcan0
+ (000.000000)  vcan0  TX B -  123  [64]  00 01 02 03 04 05 06 07 08 09 ... 3D 3E 3F
+```
+
+`[64]` is the length and `B` means bit rate switch, so this is a CAN FD frame. The other direction, from the codelab: `cansend vcan0 456##1C0C1C2C3C4C5C6C7C8C9CACBCCCDCECF` on the host, and `/tmp/canfd-test recv /dev/can1/rx0 2` on QNX prints
+
+```
+/dev/can1/rx0  456  [16]  C0 C1 C2 C3 C4 C5 C6 C7 C8 C9 CA CB CC CD CE CF  ts=16199300
+```
+
+## Quickstart
+
+Prerequisites: a Linux host (Ubuntu 22.04 or later, x86_64) with KVM, the `vcan` kernel module and QEMU with the `ctucan_pci` board (tested with QEMU 6.2), and QNX SDP 8.0 (a free non-commercial licence works). The codelab walks through every step with its output.
+
+```
+sudo apt-get install can-utils linux-modules-extra-$(uname -r)   # vcan lives in the extra modules
+git clone https://github.com/NikhilGogu/qnx-ctucanfd.git && cd qnx-ctucanfd
+scripts/host-vcan.sh vcan0                   # vcan0 with mtu 72, up
+source ~/qnx800/qnxsdp-env.sh && make        # build/x86_64/
+(mkdir -p ~/targets/tc && cd ~/targets/tc && mkqnximage --type=qemu --arch=x86_64 --ssh-ident=$HOME/.ssh/id_ed25519.pub --noprompt --run=-h > ~/targets/tc.log)
+scripts/qemu-can.sh ~/targets/tc vcan0       # restarts the target with the CAN board
+scp build/x86_64/* root@<target>:/tmp/
+# on the target: /tmp/dev-can-ctucanfd, then /tmp/canfd-test send /dev/can1/tx1 123 64
+# on the host:   candump -x vcan0
+```
+
+The full test suite (build, gate test and 41 tests) runs with `scripts/test-suite.sh tc vcan0 [tc2]`. It calls `~/bin/qtarget`; if you do not have that helper, run it as `QTARGET=scripts/qtarget-lite.sh scripts/test-suite.sh tc vcan0`, which uses the minimal helper in this repository.
+
+## How it uses QNX
+
+- **Resource manager on the CAN DDK.** `src/dev-can-ctucanfd.c` registers its callbacks with libcan (`can_resmgr_init`, `can_resmgr_init_device`, `can_resmgr_create_device`, `can_resmgr_start`), which runs the QNX resource manager loop. Clients use plain `open`, `read`, `write` and `devctl` on `/dev/can1/rx0` and `/dev/can1/tx1`, and the stock `canctl` works.
+- **Standard CAN devctls.** `cb_devctl` answers the `CAN_DEVCTL_*` commands, for example `GET_INFO`, `GET_STATS`, `SET_MID`, `SET_TIMING`, `WRITE_CANMSG_EXT` and `READ_CANMSG_EXT`. Driver-specific devctls are in `src/ctucanfd_devctl.h`.
+- **Interrupts as pulses, in bounded batches.** `can_resmgr_attach_intr()` ties the IRQ to one pulse code, and libcan calls the driver's `event_handler` on the resource manager thread, so the driver state needs no locks. Each pulse moves at most 64 frames from the RX FIFO, makes at most 8 passes over the interrupt status and returns at most 64 mailboxes to libcan (`RX_BUDGET`, `PASS_LIMIT`, `REPORT_BUDGET`), then calls `InterruptUnmask()` once. Work left over keeps an interrupt bit pending, so the next pulse continues it. See `docs/DESIGN.md`, section 3.
+- **PCI attach.** `pci_device_find`, `pci_device_attach` (exclusive owner), `pci_device_read_ba` and `pci_device_read_irq` find the board; the core's registers are mapped with `mmap_device_memory` and `PROT_NOCACHE`.
+- **Around the driver.** `tools/ecu-sim.c` sends its telemetry from a `SCHED_FIFO` thread with absolute `clock_nanosleep` deadlines. `tools/ctucan-supervisor.c` starts the driver with `posix_spawn` and counts it ready only when the process it started answers a `CAN_DEVCTL_GET_INFO` message. The driver logs to slog2.
+
+## Why it matters
+
+An application that uses libcan's devices and devctls can be run and checked against this driver on a machine with QNX SDP and QEMU, with no CAN board, and the same host can watch and inject frames with `candump` and `cansend`. The repository's demo is a simulated battery-management ECU that sends 64-byte telemetry and answers an OBD-II request.
+
+The test suite is scripted and exits non-zero if the build, the gate test or any test fails, so it can run unattended on such a machine.
+
+This is a test fixture path, QEMU only. Production CAN controllers such as FlexCAN and MCAN are out of scope. The driver has not run on ARM or on CTU CAN FD silicon, and QEMU models no bit timing or bus errors, so timing results are QEMU timing.
 
 ## What is in the repository
 
@@ -22,6 +77,8 @@ Tutorial: the codelab [Test CAN FD software on QNX 8.0 in QEMU, no hardware need
 | `probe/ctucan_probe.c` | Reads the board's identification registers |
 | `scripts/` | QEMU launch with the CAN board, host vcan setup, gate test, full test suite |
 | `docs/DESIGN.md` | How it works and what was measured |
+| `docs/TESTS.md`, `docs/test-results.txt` | What the 41 tests cover, the measurements, and the recorded run |
+| `NOTICE` | Where the register map comes from |
 | `codelab/` | QNX codelab "Test CAN FD software on QNX 8.0 in QEMU, no hardware needed" and its dry runs |
 
 ## The emulated hardware
@@ -125,34 +182,22 @@ Two QEMU targets, each with its own `ctucan_pci` board, both started with `scrip
 # host:   the observer     candump -t d -x vcan0
 ```
 
-The tester checks every telemetry frame from node 1 (length, CRC-8, sequence), sends a 64-byte CAN FD echo request on 0x1E0 every 10 ms, which ecu-sim sends back unchanged on 0x1E8, and times each round trip on its own clock; once a second it sends the diagnostic request. Measured (`two_nodes`, 30 s, `docs/test-results.txt`): 3094 of 3094 telemetry frames on node 2 with sequence and CRC clean, also on `vcan0`; 3000 of 3000 echo round trips with every byte checked on node 2 and on `vcan0`, round trip on node 2's clock min 2.751 ms, median 3.271, 99th percentile 3.681, max 4.162; of that, node 1 between request and reply on `vcan0` median 1.700 ms, 99th percentile 1.998; 30 of 30 diagnostic requests answered.
+The tester's measurements (telemetry, echo round trips, diagnostic requests) are in [docs/TESTS.md](docs/TESTS.md).
 
 ## Tests
 
-`scripts/test-suite.sh tc vcan0 [tc2]` builds both variants and runs `scripts/gate-test.sh` and every test in `scripts/tests/ctutest.py` against the QEMU target, keeping the output in `build/test-results-*.txt`. With a second target on the same interface (`tc2`) it also runs the two-node test; without one that test is skipped. The scripts reach the target through `~/bin/qtarget NAME ssh|put`; set `QTARGET=scripts/qtarget-lite.sh` to use the minimal helper in this repository, which finds the target in `~/targets/NAME` with `mkqnximage --getip`. The host side uses a raw SocketCAN socket and `candump -L`, and checks complete frames: identifier, format, length, every payload byte including padding, and sequence numbers.
+`scripts/test-suite.sh tc vcan0 [tc2]` builds both variants and runs `scripts/gate-test.sh` and every test in `scripts/tests/ctutest.py` against the QEMU target, keeping the output in `build/test-results-*.txt`. The host side uses a raw SocketCAN socket and `candump -L`, and checks complete frames: identifier, format, length, every payload byte including padding, and sequence numbers. The recorded run (commit c9c7745, from a clean clone, two QNX 8.0 x86_64 targets under QEMU 6.2 with KVM): the gate test and 41 of 41 tests passed, two-node test included. [docs/test-results.txt](docs/test-results.txt) has every result line.
 
-Results of the run recorded in `docs/test-results.txt` (commit c9c7745, from a clean clone with `QTARGET=scripts/qtarget-lite.sh`, two QNX 8.0 x86_64 targets under QEMU 6.2 with KVM): the gate test and 41 of 41 tests passed, two-node test included, and every binary copied to the target was checked by md5.
-
-- Every length from 0 to 64 from QNX to the host, and every classic and CAN FD length to QNX, checked byte for byte including padding; remote frames both ways; 11-bit and 29-bit ids both ways, including 29-bit ids whose low 18 bits are zero.
-- Four blocked readers on one mailbox: each of 200 frames reached exactly one reader and all four finished. Four writers at once: 4 x 100 frames, each stream in order. With no reader, the 64-frame mailbox queue kept the newest 64 of 100 frames.
-- 2000 frames of 64 bytes each way at the same time, 2 ms apart: both streams complete and in order.
-- Bounded interrupt service: 300 frames in bursts of 90 arrived in order in 7 interrupt pulses of at most 64 frames, and a client's devctls were answered 757 times while frames were still coming; at that load the longest took 32533 us, and 2636 us with 4-frame batches. A pulse that arrives while the core is stopped after a failed reset is unmasked with the core's interrupt output left off (1 pulse, then none in the next second), and a mailbox whose wake-ups fail is retried for 8 pulses and then dropped and counted.
-- TX order across four TXT buffers: 2000/2000 in order with no pacing. With completions held back by the fault injector, 1000/1000 in order across 249 TX commands that readied several buffers at once; the same run with the stage-one fixed priorities broke order 996 times (negative control).
-- Restart under load, 1 ms workload (`restart_under_load`): ecu-sim telemetry on 0x2F8 every 1 ms, the host sending 500 frames/s of 64 bytes into QNX, three `slay -s KILL dev-can-ctucanfd` 2 s apart with the supervisor: telemetry gaps of 9.0, 6.5 and 8.4 ms in candump timestamps (8, 7 and 8 periods lost); the driver was ready 6.2, 7.8 and 6.4 ms after the supervisor started it.
-- Supervisor: it kills and restarts a driver that does not become ready, takes a driver as ready only when the process it started serves the path, abandons a readiness probe that a server never answers, and counts spawn failures.
-- ecu-sim for 30 s at its 10 ms period: 3032 frames, CRC and sequence clean; period in QEMU timestamps on vcan0 mean 10.000 ms, standard deviation 0.049 ms, 1st and 99th percentile 9.870 and 10.131 ms. The diagnostic request was answered 1.1 ms after it was sent.
-- Two QNX nodes: see the section above.
-- Fault injection: warning limit up and down, error passive, bus-off with automatic recovery (300/300 frames in order), bus-off whose FAULT_STATE reads none and then passive before active (TX stayed held until active), bus-off with manual recovery (no frame left while bus-off, the writer got EAGAIN, all 100 queued frames left in order afterwards), aborts that do not finish in time, also with no traffic and no ticker (dropped and counted at bus-off, TX resumed), late TX completions with one RX frame per pulse (none lost), a restart whose reset times out followed by one that works, a corrupt RX format word among payloads that look like format words (no frame fabricated), and state cleared by scenario OFF and by a reset. The fault injector changes only what the driver sees; QEMU sends each frame when it is set ready (docs/DESIGN.md, section 8).
-- Also: short devctl payloads refused, SJW larger than a phase segment refused, SIGTERM reaches the cleanup path, a spoofed interrupt pulse is refused by the kernel and counted, and the normal build refuses the fault-injection devctls.
+What the tests cover, with the numbers: [docs/TESTS.md](docs/TESTS.md). In short: every frame length and id format both ways, byte for byte; concurrent readers and writers; bounded interrupt service; TX order; driver restart under load with the supervisor; two QNX nodes; and error, bus-off and reset paths through the fault injector.
 
 ## Limitations
 
+- Per-frame FDF, BRS and ESI flags are not reported to clients: libcan's `CAN_MSG` has no field for them, so the frame format is a driver policy (`docs/DESIGN.md`, section 6). To see the flags of frames QNX sends, run `candump -x vcan0` on the host: `B` means bit rate switch.
 - QEMU 6.2 has no bit timing, error counters, fault confinement or bus timing. Bit timing is computed and written for silicon and ignored by QEMU.
 - The error and bus-off paths are tested through the fault injector only.
 - Times measured on the host are QEMU timing on vcan0.
 - One active core per board (the two cores share one interrupt line in QEMU's model).
 - Acceptance filtering is in software only. QEMU 6.2's model has no acceptance filters (it ignores the filter registers and stores every frame), and the driver does not program the core's filters.
-- Per-frame FDF, BRS and ESI flags are not reported to clients (libcan's `CAN_MSG` has no field for them).
 - Devctl latency has no upper bound: a sustained interrupt load at a priority above the clients' can delay them.
 - Two nodes are two QEMU virtual machines joined by the host's vcan; no physical CAN bus was used.
 - The aarch64le build compiles and links and has not run.
@@ -163,8 +208,8 @@ Results of the run recorded in `docs/test-results.txt` (commit c9c7745, from a c
 
 ## Licence
 
-Apache-2.0, see `LICENSE`. The CAN DDK (`libcan`) and QNX SDP are QNX products under their own licence and are not part of this repository.
+Apache-2.0, see `LICENSE`. The CAN DDK (`libcan`) and QNX SDP are QNX products under their own licence and are not part of this repository. The register map: see `NOTICE`.
 
 ## References
 
-QNX CAN DDK guide (qnx.com/developers/docs, `com.qnx.doc.ddk/topic/can`), CTU CAN FD IP core datasheet (canbus.pages.fel.cvut.cz/ctucanfd_ip_core), QEMU `hw/net/can/ctucan_core.c` and `docs/system/devices/can.rst`.
+QNX CAN DDK guide (qnx.com/developers/docs, `com.qnx.doc.ddk/topic/can`), [CTU CAN FD IP core datasheet](https://canbus.pages.fel.cvut.cz/ctucanfd_ip_core/doc/Datasheet.pdf), QEMU `hw/net/can/ctucan_core.c` and `docs/system/devices/can.rst`.
