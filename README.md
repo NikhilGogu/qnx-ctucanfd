@@ -156,6 +156,7 @@ Frames over 8 bytes go out as CAN FD with bit rate switch, lengths rounded up to
 /tmp/canfd-test info /dev/can1/rx0                   # libcan statistics and error registers
 /tmp/canfd-test xstats /dev/can1/rx0                 # driver statistics
 /tmp/canfd-test time /dev/can1/rx0                   # 64-bit and 32-bit timestamps
+/tmp/canfd-test fdstats /dev/can1/rx0                # frames by format: classic, CAN FD, BRS, ESI
 /tmp/canctl -u1,tx1 -i                               # the stock QNX canctl works too
 
 # host
@@ -163,7 +164,7 @@ candump -x vcan0
 cansend vcan0 456##1C0C1C2C3                         # CAN FD frame with BRS to QNX
 ```
 
-Driver-specific devctls are in `src/ctucanfd_devctl.h`: extended statistics, a 64-bit timestamp, manual bus-off recovery (when `-a` is not given) and fault injection.
+Driver-specific devctls are in `src/ctucanfd_devctl.h`: extended statistics, frame counts by format, a 64-bit timestamp, manual bus-off recovery (when `-a` is not given) and fault injection.
 
 Supervision and the ECU demo:
 
@@ -196,7 +197,7 @@ What the tests cover, with the numbers: [docs/TESTS.md](docs/TESTS.md). In short
 
 ## Limitations
 
-- Per-frame FDF, BRS and ESI flags are not reported to clients: libcan's `CAN_MSG` has no field for them, so the frame format is a driver policy (`docs/DESIGN.md`, section 6). To see the flags of frames QNX sends, run `candump -x vcan0` on the host: `B` means bit rate switch.
+- Per-frame FDF, BRS and ESI flags are not reported to clients: libcan's `CAN_MSG` has no field for them, so the frame format is a driver policy (`docs/DESIGN.md`, section 6). The driver counts frames by format both ways (`canfd-test fdstats`, `CTUCAN_DEVCTL_GET_FDSTATS`). To see the flags of single frames QNX sends, run `candump -x vcan0` on the host: `B` means bit rate switch.
 - QEMU 6.2 has no bit timing, error counters, fault confinement or bus timing. Bit timing is computed and written for silicon and ignored by QEMU.
 - The error and bus-off paths are tested through the fault injector only.
 - Times measured on the host are QEMU timing on vcan0.
