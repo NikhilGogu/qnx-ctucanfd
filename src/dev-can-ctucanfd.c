@@ -31,6 +31,7 @@
 #include <hw/libcan.h>
 #include "ctucanfd_hw.h"
 #include "ctucanfd_devctl.h"
+#include "ctucanfd_time.h"
 
 #define DRV_NAME        "dev-can-ctucanfd"
 #define MAX_RX_DEVS     16
@@ -107,7 +108,7 @@ struct drv {
     bool     ewl;                   /* last STATUS.EWL, tracked apart from FAULT_STATE */
     bool     busoff_hold;           /* set at bus-off, cleared only by FAULT_STATE = error active */
 
-    int64_t          ts_delta;
+    uint32_t         ts_offset;     /* timestamps: ctucanfd_time.h */
     CAN_DEVCTL_STATS stats;
     ctucan_xstats_t  x;
 
@@ -121,12 +122,18 @@ struct drv {
 
 static drv_t g_drv;
 
-static uint32_t now_us(const drv_t *d)
+static uint64_t mono_us(void)
 {
     struct timespec ts;
 
     clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (uint32_t)((int64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000 + d->ts_delta);
+    return (uint64_t)ts.tv_sec * 1000000u + (uint64_t)ts.tv_nsec / 1000u;
+}
+
+/* The 32-bit timestamp of frames and CAN_DEVCTL_GET_TIMESTAMP: wraps every 2^32 us. */
+static uint32_t now_us(const drv_t *d)
+{
+    return ctucan_ts32(mono_us(), d->ts_offset);
 }
 
 static uint64_t now_ms(void)
@@ -878,9 +885,15 @@ static int cb_devctl(CANDEV *cdev, io_devctl_t *msg)
         break;
     case CAN_DEVCTL_SET_TIMESTAMP:
         NEED(sizeof(in->timestamp));
-        d->ts_delta += (int64_t)in->timestamp - (int64_t)now_us(d);
+        d->ts_offset = ctucan_ts_offset_for(mono_us(), in->timestamp);
         rc = EOK;
         break;
+    case CTUCAN_DEVCTL_GET_TIMESTAMP64: {
+        uint64_t ts = ctucan_ts64(mono_us(), d->ts_offset);
+        memcpy(out, &ts, sizeof(ts));
+        rc = sizeof(ts);
+        break;
+    }
     case CAN_DEVCTL_GET_INFO: {
         CAN_DEVCTL_INFO *info = &out->info;
         memset(info, 0, sizeof(*info));
