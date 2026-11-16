@@ -97,7 +97,8 @@ struct drv {
 
     /* TX */
     txslot_t txs[CTUCAN_TXT_BUFFERS];
-    unsigned txb_head, txb_tail;    /* running counters; buffer = counter % ntxb */
+    unsigned txb_head, txb_tail;    /* next TXT buffer to fill, oldest in flight */
+    unsigned txb_n;                 /* frames in TXT buffers */
     unsigned tx_rr;
     uint32_t tx_seq;
     bool     tx_stopped;            /* restart or shutdown in progress */
@@ -143,7 +144,7 @@ static void fi_tick(drv_t *d);
 
 static unsigned tx_inflight(const drv_t *d)
 {
-    return d->txb_head - d->txb_tail;
+    return d->txb_n;
 }
 
 static bool tx_admit(const drv_t *d)
@@ -159,7 +160,7 @@ static void tx_set_prio(drv_t *d)
         return;
     }
 #endif
-    ctucan_hw_tx_prio(&d->hw, d->ntxb, d->txb_tail % d->ntxb);
+    ctucan_hw_tx_prio(&d->hw, d->ntxb, d->txb_tail);
 }
 
 /* Takes the next queued frame, round robin across TX mailboxes. */
@@ -182,7 +183,7 @@ static void tx_kick(drv_t *d)
     unsigned ready = 0;
 
     while (tx_admit(d) && tx_inflight(d) < d->ntxb) {
-        unsigned b = d->txb_head % d->ntxb;
+        unsigned b = d->txb_head;
         if (!ctucan_txt_writable(ctucan_hw_txt_state(&d->hw, b))) {
             break;  /* its state change interrupt brings us back */
         }
@@ -216,7 +217,8 @@ static void tx_kick(drv_t *d)
         s->ext = m.ext.is_extended_mid != 0;
         s->rtr = m.ext.is_remote_frame != 0;
         s->late = false;
-        d->txb_head++;
+        d->txb_head = (b + 1) % d->ntxb;
+        d->txb_n++;
         d->x.tx_started++;
         ready |= 1u << b;
         if (tx_inflight(d) > d->x.tx_max_inflight) {
@@ -241,7 +243,7 @@ static unsigned tx_retire(drv_t *d)
     unsigned n = 0;
 
     while (tx_inflight(d) > 0) {
-        unsigned b = d->txb_tail % d->ntxb;
+        unsigned b = d->txb_tail;
         unsigned st = TXT_STATE(ts, b);
 
         switch (st) {
@@ -267,8 +269,8 @@ static unsigned tx_retire(drv_t *d)
         default:
             /* Ready, in transmission or aborting. Later buffers have lower
              * priority, so one of them finishing first is an ordering fault. */
-            for (unsigned k = d->txb_tail + 1; k != d->txb_head; k++) {
-                unsigned o = k % d->ntxb;
+            for (unsigned k = 1; k < d->txb_n; k++) {
+                unsigned o = (b + k) % d->ntxb;
                 if (!d->txs[o].late && TXT_STATE(ts, o) == TXT_TOK) {
                     d->txs[o].late = true;
                     d->x.tx_order_err++;
@@ -276,7 +278,8 @@ static unsigned tx_retire(drv_t *d)
             }
             return n;
         }
-        d->txb_tail++;
+        d->txb_tail = (b + 1) % d->ntxb;
+        d->txb_n--;
         if (d->ntxb > 1) {
             tx_set_prio(d);
         }
@@ -293,8 +296,8 @@ static void tx_abort_inflight(drv_t *d)
     uint32_t ts = ctucan_rd(&d->hw, CTUCAN_TX_STATUS);
     unsigned mask = 0;
 
-    for (unsigned k = d->txb_tail; k != d->txb_head; k++) {
-        unsigned b = k % d->ntxb;
+    for (unsigned k = 0; k < d->txb_n; k++) {
+        unsigned b = (d->txb_tail + k) % d->ntxb;
         unsigned st = TXT_STATE(ts, b);
         if (st == TXT_RDY || st == TXT_TRAN) {
             mask |= 1u << b;
@@ -319,6 +322,7 @@ static void tx_force_retire(drv_t *d)
     d->x.tx_aborted += n;
     can_slogf(SLOG2_ERROR, DRV_NAME ": %u TXT buffer(s) did not finish or abort in time, dropped", n);
     d->txb_tail = d->txb_head;
+    d->txb_n = 0;
     if (d->ntxb > 1) {
         tx_set_prio(d);
     }
@@ -776,7 +780,7 @@ static int restart_controller(drv_t *d)
     }
     ctucan_hw_start(&d->hw, &d->cfg, d->int_ena);
     d->suppressed = false;
-    d->txb_head = d->txb_tail = 0;
+    d->txb_head = d->txb_tail = d->txb_n = 0;
     tx_set_prio(d);
     d->fs = ctucan_rd(&d->hw, CTUCAN_EWL_ERP_FAULT) & FS_MASK;
     d->ewl = (ctucan_rd(&d->hw, CTUCAN_STATUS) & STAT_EWL) != 0;

@@ -269,6 +269,7 @@ Each row is a defect found in an earlier version of the driver or its tools, how
 | The normal build accepted the fault-injection devctls | It answers them like any unknown command | `fi_rejected_normal` |
 | The supervisor trusted the path name, waited for ever and ignored spawn failures | It checks the server pid and a bounded `GET_INFO`, kills and restarts on timeout, and counts spawn failures | `supervisor_readiness` |
 | The supervisor's readiness probe could hang on a server that never replies | The probe runs in a forked child that is abandoned at 200 ms | `supervisor_hang` |
+| With three TXT buffers, the TX ring's 32-bit counters mapped two frames to one buffer at their wrap, and one frame was never sent | Buffer indices and a count replace the running counters | `tests/host/test_driver.c` (`test_tx_wrap`); not yet run on a target |
 | A failed copy could leave an old binary on the target | The gate test and the suite compare the md5 on the target with the build after every copy | every run |
 
 Still open:

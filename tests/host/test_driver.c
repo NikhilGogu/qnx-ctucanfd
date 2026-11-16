@@ -216,8 +216,9 @@ static void test_tx_ring(void)
     CHECK_EQ(run("", body_tx_ring), 0);
 }
 
-/* Frames sent across the 2^32 wrap of the ring counters: each one is set
- * ready in some TXT buffer exactly once, in the order written. */
+/* Frames sent around the ring several times, starting at its last buffer:
+ * each one is set ready in some TXT buffer exactly once, in the order
+ * written. */
 static unsigned wrap_sent[64], wrap_nsent;
 
 static void body_tx_wrap(void)
@@ -225,10 +226,10 @@ static void body_tx_wrap(void)
     const unsigned total = 3 * g_drv.ntxb + 2;
     unsigned written = 0;
 
-    /* Driver state set directly: the ring counters one buffer set before the
-     * wrap. The first set fills every buffer, the queue fills behind it, and
-     * the refill after they finish crosses the wrap in one tx_kick(). */
-    g_drv.txb_head = g_drv.txb_tail = UINT32_MAX - g_drv.ntxb;
+    /* Driver state set directly: the ring starts at its last buffer. The
+     * first set fills every buffer, the queue fills behind it, and the refill
+     * after they finish goes past the end of the ring in one tx_kick(). */
+    g_drv.txb_head = g_drv.txb_tail = g_drv.ntxb - 1;
     wrap_nsent = 0;
     for (unsigned round = 0; round < 4 * total && wrap_nsent < total; round++) {
         while (written < total && lc.dev[TX1]->msg_queue->msgcnt < g_drv.ntxb) {
@@ -258,7 +259,6 @@ static void body_tx_wrap(void)
         fake_pulse();
     }
     ctucan_xstats_t x = xstats();
-    CHECK(g_drv.txb_head < 16u, "ring counters wrapped (head %u)", g_drv.txb_head);
     CHECK_EQ(wrap_nsent, total);
     for (unsigned i = 0; i < wrap_nsent; i++) {
         CHECK(wrap_sent[i] == 0x200 + i, "ntxb %u: frame %u sent as 0x%x", g_drv.ntxb, i, wrap_sent[i]);
