@@ -495,8 +495,8 @@ Terminal 2 shows the requests from node 2 and the answers from node 1, both 64-b
 
 What the tester measured:
 
-* **Telemetry, node 1 to node 2:** every frame in the range arrived, in order, with a correct CRC. The range starts before the tester did: the first frames it read had waited in node 2's receive queue, which keeps the newest 64. The period, measured with the timestamps node 2's driver gave the frames, is the 10 ms that ecu-sim keeps on node 1.
-* **Echo, node 2 to node 1 and back:** every request was answered with the same 64 bytes. The round trip is measured on node 2's clock alone, so the two virtual machines' clocks need not agree. In candump each answer follows its request after about 1.7 ms (1.4 to 3 ms in our runs): that part of the round trip is node 1 (its QEMU, driver and ecu-sim); the rest is node 2's own way out and back in.
+* Telemetry from node 1 to node 2: every frame in the range arrived, in order, with a correct CRC. The range starts before the tester did: the first frames it read had waited in node 2's receive queue, which keeps the newest 64. The period, measured with the timestamps node 2's driver gave the frames, is the 10 ms that ecu-sim keeps on node 1.
+* Echo from node 2 to node 1 and back: every request was answered with the same 64 bytes. The round trip is measured on node 2's clock alone, so the two virtual machines' clocks need not agree. In candump each answer follows its request after about 1.7 ms (1.4 to 3 ms in our runs): that part of the round trip is node 1 (its QEMU, driver and ecu-sim); the rest is node 2's own way out and back in.
 * All of these times are QEMU timing on your machine.
 
 Stop `candump` in terminal 2 with Ctrl+C.
@@ -534,10 +534,14 @@ If nothing else on your machine uses `vcan0`, remove it too: `sudo ip link delet
 ## What next
 Duration: 1:00
 
-* **The test suite:** `scripts/test-suite.sh` builds the driver and runs the end-to-end tests against a target; with a second target it also runs the two-node test you just did by hand. The README says how to point it at your targets.
-* **Errors and bus-off:** QEMU models no bus errors, so the driver has a fault injection build (`make FI=1`) that plays error and bus-off sequences to it. `docs/DESIGN.md` explains how the driver works and what each test shows.
-* **Your own application:** anything that uses libcan's `devctl()` interface, such as `CAN_DEVCTL_READ_CANMSG_EXT` and `CAN_DEVCTL_WRITE_CANMSG_EXT`, can run against this driver in QEMU first.
-* **Hardware:** the driver has not run on CTU CAN FD silicon or on ARM.
-* **QNX documentation:** [mkqnximage](https://www.qnx.com/developers/docs/8.0/com.qnx.doc.neutrino.utilities/topic/m/mkqnximage.html), [pidin](https://www.qnx.com/developers/docs/8.0/com.qnx.doc.neutrino.utilities/topic/p/pidin.html), [slay](https://www.qnx.com/developers/docs/8.0/com.qnx.doc.neutrino.utilities/topic/s/slay.html) and [procmgr_event_notify()](https://www.qnx.com/developers/docs/8.0/com.qnx.doc.neutrino.lib_ref/topic/p/procmgr_event_notify.html).
+`scripts/test-suite.sh` builds the driver and runs the end-to-end tests against a target. With a second target it also runs the two-node test you just did by hand. The README says how to point it at your targets.
+
+QEMU models no bus errors, so the driver has a fault injection build (`make FI=1`) that plays error and bus-off sequences to it. `docs/DESIGN.md` explains how the driver works and what each test shows.
+
+Any application that uses libcan's `devctl()` interface, such as `CAN_DEVCTL_READ_CANMSG_EXT` and `CAN_DEVCTL_WRITE_CANMSG_EXT`, can run against this driver in QEMU first.
+
+The driver has not run on CTU CAN FD silicon or on ARM.
+
+QNX documentation: [mkqnximage](https://www.qnx.com/developers/docs/8.0/com.qnx.doc.neutrino.utilities/topic/m/mkqnximage.html), [pidin](https://www.qnx.com/developers/docs/8.0/com.qnx.doc.neutrino.utilities/topic/p/pidin.html), [slay](https://www.qnx.com/developers/docs/8.0/com.qnx.doc.neutrino.utilities/topic/s/slay.html) and [procmgr_event_notify()](https://www.qnx.com/developers/docs/8.0/com.qnx.doc.neutrino.lib_ref/topic/p/procmgr_event_notify.html).
 
 The driver, its design notes and its test logs are at [github.com/NikhilGogu/qnx-ctucanfd](https://github.com/NikhilGogu/qnx-ctucanfd). Report problems with this codelab there.

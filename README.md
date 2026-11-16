@@ -1,12 +1,20 @@
 # dev-can-ctucanfd: CAN FD for QNX 8.0, tested in QEMU
 
-Run your CAN FD application on QNX 8.0 in QEMU, with no board.
+`dev-can-ctucanfd` is a QNX 8.0 driver for the CTU CAN FD controller that QEMU emulates as the PCI board `ctucan_pci`. It is built on the QNX CAN DDK (`libcan`) and gives QNX programs the usual libcan devices, `/dev/can1/rx0` and `/dev/can1/tx1`, with 64-byte CAN FD payloads. QEMU bridges the virtual CAN bus to SocketCAN on the Linux host, so `candump` and `cansend` there see and send the frames.
+
+It is for developers who write CAN or CAN FD software for QNX and want to run and test it with no CAN board, on a workstation or a CI runner.
+
+It needs a Linux host with KVM, QEMU with `ctucan_pci` (tested with 6.2), the vcan module, can-utils, QNX SDP 8.0 in `~/qnx800` and an ssh key in `~/.ssh/id_ed25519.pub`. The [Quickstart](#quickstart) below sets up `vcan0` and a QNX image in QEMU with the CAN board. After that, one command builds the driver, runs the gate test and every end-to-end test, and exits non-zero if any fails:
+
+```
+QTARGET=scripts/qtarget-lite.sh scripts/test-suite.sh tc vcan0
+```
 
 [Demo video](https://youtu.be/cFywX90Fi-M) | [Codelab: Test CAN FD software on QNX 8.0 in QEMU, no CAN board needed](https://nikhil-qnx-codelabs.pages.dev/qnx-canfd-qemu/) | [Design](docs/DESIGN.md) | [Test results](docs/test-results.txt)
 
-`dev-can-ctucanfd` is a native QNX 8.0 driver for the CTU CAN FD IP core, built on the QNX CAN DDK (`libcan`). QEMU emulates a PCI board carrying this core (`ctucan_pci`), so CAN and CAN FD software for QNX can be developed and tested in a virtual machine, talking to Linux SocketCAN tools (`candump`, `cansend`) on the host. The driver gives QNX applications the usual libcan devices, `/dev/can1/rx0` and `/dev/can1/tx1`, with 64-byte CAN FD payloads. It is an ordinary QNX process, and `ctucan-supervisor` starts it again when it dies. In `restart_under_load` the driver was killed three times under load and telemetry resumed each time; frames in the dead driver's queues are lost ([docs/TESTS.md](docs/TESTS.md)).
+Status (v0.2.0): tested in QEMU 6.2 with QNX SDP 8.0 on x86_64, also with two QNX nodes on one virtual CAN bus. In the recorded run at commit c9c7745, 41 of 41 end-to-end tests passed ([docs/test-results.txt](docs/test-results.txt)). Since that run the driver has changed only in comments; `scripts/qemu-can.sh` now also stops the QEMU in the target's pid file, and the host unit tests were added. The suite has not been run again on a target since. It compiles and links for aarch64le. It has not run on ARM or on CTU CAN FD silicon.
 
-Status (v0.2.0): tested in QEMU 6.2 with QNX SDP 8.0 on x86_64, also with two QNX nodes on one virtual CAN bus. 41 of 41 end-to-end tests pass ([docs/test-results.txt](docs/test-results.txt)). It compiles and links for aarch64le. It has not run on ARM or on CTU CAN FD silicon.
+The driver is an ordinary QNX process, and `ctucan-supervisor` starts it again when it dies. In `restart_under_load` the driver was killed three times under load and telemetry resumed each time; frames in the dead driver's queues are lost ([docs/TESTS.md](docs/TESTS.md)).
 
 The codelab's source is in [codelab/](codelab/qnx-canfd-qemu.md), and [codelab/DRYRUN.md](codelab/DRYRUN.md) records how it was checked.
 
@@ -74,7 +82,7 @@ The full test suite (build, gate test and 41 tests) runs with `scripts/test-suit
 
 libcan runs every callback on one thread, so the driver state needs no locks. Between pulses that thread is back in its message loop. Which waiting message it takes first depends on the priorities of the pulse and the client, so devctl latency has no upper bound (Limitations). `docs/DESIGN.md`, section 3, has the details.
 
-## Why it matters
+## Use in testing
 
 An application that uses libcan's devices and devctls can be run and checked against this driver on a machine with QNX SDP and QEMU, with no CAN board, and the same host can watch and inject frames with `candump` and `cansend`. The repository's demo is a simulated battery-management ECU that sends 64-byte telemetry and answers an OBD-II request.
 
@@ -207,7 +215,7 @@ The tester's measurements (telemetry, echo round trips, diagnostic requests) are
 
 The hardware layer also has unit tests that need no QNX: `make -C tests/host run` builds `src/ctucanfd_hw.c` with the host compiler against a fake core and checks DLC tables, bit timing, TXT buffer encoding and the RX format-word checks. The `checks` workflow runs them on every push.
 
-What the tests cover, with the numbers: [docs/TESTS.md](docs/TESTS.md). In short: every frame length and id format both ways, byte for byte; concurrent readers and writers; bounded interrupt service; TX order; driver restart under load with the supervisor; two QNX nodes; and error, bus-off and reset paths through the fault injector.
+What the tests cover, with the numbers: [docs/TESTS.md](docs/TESTS.md). They check every frame length and id format both ways, byte for byte; concurrent readers and writers; bounded interrupt service; TX order; driver restart under load with the supervisor; two QNX nodes; and error, bus-off and reset paths through the fault injector.
 
 ## Limitations
 
