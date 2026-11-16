@@ -9,8 +9,8 @@ CFLAGS  := -std=gnu11 -O1 -g -Wall -Wextra -Werror -Wshadow \
 SAN     ?= -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer
 
 HW      := $(SRC)/ctucanfd_hw.c fake_core.c
-HDRS    := $(SRC)/ctucanfd_hw.h $(SRC)/ctucanfd_regs.h fake_core.h check.h shim/sys/can_dcmd.h
-TESTS   := test_dlc_timing test_frames test_core
+HDRS    := $(SRC)/ctucanfd_hw.h $(SRC)/ctucanfd_regs.h $(SRC)/ctucanfd_time.h fake_core.h check.h shim/sys/can_dcmd.h
+TESTS   := test_dlc_timing test_frames test_core test_time
 
 all: $(addprefix $(BUILD)/,$(TESTS))
 
