@@ -1,0 +1,68 @@
+# The end-to-end suite on a self-hosted Linux runner. GitHub's hosted runners
+# have no QNX SDP, so this workflow runs only on a machine labelled qnx-sdp
+# and kvm whose owner installed QNX SDP 8.0, QEMU with the ctucan_pci board,
+# can-utils and the vcan module, and made the target once with
+# scripts/quickstart.sh. It starts only by hand.
+#
+# The suite's log holds QEMU timing figures. It is kept as an artifact only
+# when upload_results is set; the JUnit file has pass and fail only.
+name: qemu-e2e
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: mkqnximage target in ~/targets
+        default: tc
+      peer:
+        description: second target for two_nodes (empty skips that test)
+        default: ""
+      upload_results:
+        description: keep the JUnit file and the suite log as an artifact
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  e2e:
+    runs-on: [self-hosted, linux, qnx-sdp, kvm]
+    env:
+      TARGET: ${{ inputs.target }}
+      PEER: ${{ inputs.peer }}
+      COMMIT: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Host CAN interface
+        run: scripts/host-vcan.sh vcan0
+
+      # qtarget-lite.sh finds a target's address with mkqnximage, from the SDP
+      - name: Targets with the CAN board
+        run: |
+          # shellcheck source=/dev/null
+          source "${QNX_SDP_ENV:-$HOME/qnx800/qnxsdp-env.sh}" >/dev/null
+          for t in "$TARGET" ${PEER:+"$PEER"}; do
+            scripts/qemu-can.sh "$HOME/targets/$t" vcan0
+          done
+          for t in "$TARGET" ${PEER:+"$PEER"}; do
+            for _ in $(seq 90); do
+              scripts/qtarget-lite.sh "$t" ssh true && break
+              sleep 2
+            done
+          done
+
+      - name: Build, gate test and suite
+        env:
+          JUNIT: ${{ runner.temp }}/ctutest-junit.xml
+        run: scripts/test-suite.sh "$TARGET" vcan0 "$PEER"
+
+      - name: Keep results
+        if: always() && inputs.upload_results
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-results
+          path: |
+            ${{ runner.temp }}/ctutest-junit.xml
+            build/test-results-*.txt

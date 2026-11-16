@@ -23,7 +23,11 @@ jobs:
       - name: Python syntax
         run: |
           export PYTHONPYCACHEPREFIX="$RUNNER_TEMP/pycache"
-          python3 -m py_compile scripts/tests/ctutest.py codelab/dryrun/gen_pass.py
+          python3 -m py_compile scripts/tests/*.py codelab/dryrun/gen_pass.py
+
+      # The JUnit writer and the test list of ctutest.py; no target needed.
+      - name: Python unit tests
+        run: python3 -m unittest discover -s scripts/tests -p 'test_*.py' -v
 
       - name: Shell syntax
         run: |
