@@ -65,7 +65,9 @@ scp build/x86_64/* root@<target>:/tmp/
 # on the host:   candump -x vcan0
 ```
 
-The full test suite (build, gate test and every end-to-end test) runs with `scripts/test-suite.sh tc vcan0 [tc2]`. It calls `~/bin/qtarget`; if you do not have that helper, run it as `QTARGET=scripts/qtarget-lite.sh scripts/test-suite.sh tc vcan0`, which uses the minimal helper in this repository.
+`scripts/quickstart.sh` runs the same steps in one command after the `apt-get` line and the clone: vcan0, build, the image (first run only), QEMU with the CAN board, then `scripts/gate-test.sh`, which starts the driver and checks frames both ways. It has not yet been run from a fresh clone.
+
+The full test suite (build, gate test and every end-to-end test) runs with `scripts/test-suite.sh tc vcan0 [tc2]`. The scripts reach the target through `scripts/qtarget-lite.sh`; set `QTARGET` to use another helper. `JUNIT=results.xml` also writes the results as JUnit XML.
 
 ## QNX technologies used
 
@@ -86,7 +88,7 @@ libcan runs every callback on one thread, so the driver state needs no locks. Be
 
 An application that uses libcan's devices and devctls can be run and checked against this driver on a machine with QNX SDP and QEMU, with no CAN board, and the same host can watch and inject frames with `candump` and `cansend`. The repository's demo is a simulated battery-management ECU that sends 64-byte telemetry and answers an OBD-II request.
 
-The test suite is scripted and exits non-zero if the build, the gate test or any test fails, so it can run unattended on such a machine.
+The test suite is scripted and exits non-zero if the build, the gate test or any test fails, so it can run unattended on such a machine. `.github/workflows/qemu-e2e.yml` shows how: a self-hosted Linux runner with QNX SDP, KVM and vcan runs the suite by hand from GitHub and gets one JUnit test case per test. `tools/ecu-sim.c` and `canfd-test tester` are the example application and its tester. The workflow has not run on a registered runner yet.
 
 This is a test fixture path, QEMU only. Production CAN controllers such as FlexCAN and MCAN are out of scope. The driver has not run on ARM or on CTU CAN FD silicon, and QEMU models no bit timing or bus errors, so timing results are QEMU timing.
 
