@@ -1,6 +1,6 @@
 #!/bin/bash
 # gate-test.sh [target] [host-if]
-# Quick end-to-end check on the build box after `make` and scripts/qemu-can.sh:
+# Quick end-to-end check on the Linux host after `make` and scripts/qemu-can.sh:
 # deploys the driver to a qtarget target, exchanges CAN and CAN FD frames with
 # the host and compares complete frames.
 set -uo pipefail

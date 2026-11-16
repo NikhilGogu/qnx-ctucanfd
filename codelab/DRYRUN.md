@@ -1,14 +1,14 @@
-# Dry runs of the codelab
+# How the codelab was checked
 
-Dates: 3 and 4 November 2026 (UTC). Each pass follows `qnx-canfd-qemu.md` from the top in a new workspace on the build box: Ubuntu 22.04.5 LTS, kernel 6.8.0-1066-aws, QEMU 6.2.0 (Debian 1:6.2+dfsg-2ubuntu6.31) with KVM, can-utils 2020.11.0-1, QNX SDP 8.0 in `~/qnx800`.
+The codelab was run from the top nine times on 3 and 4 November 2026 (UTC), each time in a new workspace, on one Linux host: Ubuntu 22.04.5 LTS, kernel 6.8.0-1066-aws, QEMU 6.2.0 (Debian 1:6.2+dfsg-2ubuntu6.31) with KVM, can-utils 2020.11.0-1, QNX SDP 8.0 in `~/qnx800`.
 
-How a pass runs: `dryrun/gen_pass.py` turns the codelab into a bash script in which every `bash` block runs as written, in order, apart from the substitutions below. A block whose first line is `# terminal 2` plays the reader's second terminal: it runs in its own session and gets Ctrl+C (SIGINT) at the next such block or at the end of the step. An ERR trap logs every command that exits non-zero. `dryrun/run_pass.sh N` removes the targets `tcl2` and `tc2`, generates the script, runs it with a clean environment (`env -i`, so nothing from the SDP is set beforehand) and removes both targets again. The generated scripts and full logs stayed on the box (`~/cldry/pass<N>/`).
+How a pass runs: `dryrun/gen_pass.py` turns the codelab into a bash script in which every `bash` block runs as written, in order, apart from the substitutions below. A block whose first line is `# terminal 2` plays the reader's second terminal: it runs in its own session and gets Ctrl+C (SIGINT) at the next such block or at the end of the step. An ERR trap logs every command that exits non-zero. `dryrun/run_pass.sh N` removes the targets `tcl2` and `tc2`, generates the script, runs it with a clean environment (`env -i`, so nothing from the SDP is set beforehand) and removes both targets again. The generated scripts and full logs stayed on that host (`~/cldry/pass<N>/`).
 
-Deviations from the text, the same in every pass:
+What differed from the text, the same in every pass:
 
-* `~/canfd-lab` was `~/cldry/pass<N>/canfd-lab`, and `NODE1` and `NODE2` were `~/targets/tcl2` and `~/targets/tc2`, the build box's names for targets of this agent. Both targets were created from nothing by the codelab's own commands in every pass.
-* `git clone https://github.com/NikhilGogu/qnx-ctucanfd.git` was redirected (`url.<bundle>.insteadOf` in a private `GIT_CONFIG_GLOBAL`) to a git bundle of the local repository, because the commits for this codelab are not pushed yet; the public repository holds v0.1.0.
-* `sudo apt install ...` ran as `apt-get -s install ...` (simulated; the box is shared). `sudo adduser` ran as `sudo -n adduser`; the user was already in both groups, so logging out and in was not needed.
+* `~/canfd-lab` was `~/cldry/pass<N>/canfd-lab`, and `NODE1` and `NODE2` were `~/targets/tcl2` and `~/targets/tc2`. Both targets were created from nothing by the codelab's own commands in every pass.
+* The `git clone` line cloned a local copy of the repository, because the commits for the codelab were not public yet. `run_pass.sh` now clones the public repository as the codelab says.
+* `sudo apt install ...` ran as `apt-get -s install ...` (simulated, so the host's packages stayed as they were). `sudo adduser` ran as `sudo -n adduser`; the user was already in both groups, so logging out and in was not needed.
 * `vcan0` already existed and stayed up: the target `tc` of the main test runs was attached to it, idle, during every pass. The optional `sudo ip link delete vcan0` at the end was not run.
 
 ## Pass 1, 3 Nov 21:38 UTC: stopped in step 7
@@ -79,6 +79,6 @@ Every block as written, every Check held but the last: the new check printed bot
 | 10 Second node | 31.3 s | node 2 built, started, driver up; tester `PASS`: 1095 telemetry frames, seq 2644..3738, missing 0, out of order 0, bad CRC 0; period at node 2's driver mean 10.000 ms (9.643 to 10.370); echo 1000 sent, 1000 answered, round trip min 2.855 ms, p50 3.265, p99 3.705, max 3.892; diagnostics 10 of 10, 2.876 to 3.609 ms. Terminal 2 got 2000 frames, all `TX B` and `[64]`; each answer followed its request by 1.454 to 2.320 ms (p50 1.671) |
 | 11 Clean up | 3.0 s | both targets stopped, workspace removed; the check printed nothing |
 
-Verdict: every command ran as written, every Check held, and this pass needed no change to the text. All times are QEMU timing on the build box.
+Verdict: every command ran as written, every Check held, and this pass needed no change to the text. All times are QEMU timing on that host.
 
 The durations in the text (44 minutes in all) are our estimate for a reader who types the commands and reads the explanations; the machine time of a pass is about one minute.

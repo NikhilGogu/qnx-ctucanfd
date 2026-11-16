@@ -1,6 +1,6 @@
 #!/bin/bash
 # test-suite.sh [target] [host-if] [peer]
-# Runs everything on the build box: builds the normal and fault-injection
+# Runs everything on the Linux host: builds the normal and fault-injection
 # variants, runs gate-test.sh and every test in scripts/tests/ctutest.py
 # against the QEMU target, and keeps the output in build/test-results-*.txt.
 # With a peer (a second target started with scripts/qemu-can.sh on the same
