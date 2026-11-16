@@ -271,7 +271,7 @@ static void body_tx_wrap(void)
 
 static void test_tx_wrap(void)
 {
-    static const char *const args[] = { "-T 1", "-T 2", "-T 4" };
+    static const char *const args[] = { "-T 1", "-T 2", "-T 3", "-T 4" };
 
     for (unsigned i = 0; i < sizeof(args) / sizeof(args[0]); i++) {
         CHECK_EQ(run(args[i], body_tx_wrap), 0);
