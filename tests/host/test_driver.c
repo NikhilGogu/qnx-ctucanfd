@@ -7,7 +7,8 @@
  * start-up and shutdown and drives the driver only through the callbacks it
  * gave libcan: interrupt pulses, client writes and devctls. Driver state is
  * read for assertions and set directly only where noted (ring counters near
- * the wrap, the mailbox return budget that FI builds set).
+ * the wrap, the mailbox return budget that FI builds set, the time of the
+ * last register dump).
  */
 #include <errno.h>
 #include <stdint.h>
@@ -654,10 +655,17 @@ static void body_devctl(void)
     CHECK_EQ((fake.mem[CTUCAN_BTR / 4] >> BTR_BRP_SHIFT) & 0xffu, 8);
     CHECK_EQ(fake.mem[CTUCAN_MODE / 4] & SET_ENA, SET_ENA);
 
-    /* the rest */
+    /* the register dump: at most once a second, so no client can flood slog2 */
     unsigned lines = lc.slog_lines;
     CHECK_EQ(dc(RX0, CAN_DEVCTL_DEBUG_INFO, NULL, 0, 0), 0);
-    CHECK(lc.slog_lines - lines >= 16, "%u register lines", lc.slog_lines - lines);
+    unsigned dump = lc.slog_lines - lines;
+    CHECK(dump >= 16, "%u register lines", dump);
+    lines = lc.slog_lines;
+    CHECK(dc(TX1, CAN_DEVCTL_DEBUG_INFO2, NULL, 0, 0) == -1 && errno == EAGAIN, "second dump within a second");
+    CHECK_EQ(lc.slog_lines, lines);
+    g_drv.dump_ms -= 1000;  /* driver state set directly: the last dump a second ago */
+    CHECK_EQ(dc(RX0, CAN_DEVCTL_DEBUG_INFO, NULL, 0, 0), 0);
+    CHECK_EQ(lc.slog_lines - lines, dump);
     CHECK_EQ(dc(RX0, CAN_DEVCTL_ERROR, &d, 0, sizeof(d.error)), sizeof(d.error));
     CHECK_EQ(d.error.drvr1 & FS_MASK, FS_ERA);
     CHECK(dc(RX0, CTUCAN_DEVCTL_FI, &fi, sizeof(fi), 0) == -1 && errno == ENOTSUP, "FI on a normal build");
