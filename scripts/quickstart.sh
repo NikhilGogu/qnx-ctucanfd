@@ -1,4 +1,6 @@
 #!/bin/bash
+# Copyright 2026 The ctucanfd authors
+# SPDX-License-Identifier: Apache-2.0
 # quickstart.sh [target-name] [host-if]
 # From a fresh clone to a checked driver in QEMU in one command, on a Linux
 # host with KVM, QEMU with the ctucan_pci board, can-utils, the vcan module
