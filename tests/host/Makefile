@@ -12,7 +12,7 @@ SAN     ?= -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-fram
 HW      := $(SRC)/ctucanfd_hw.c fake_core.c
 HDRS    := $(SRC)/ctucanfd_hw.h $(SRC)/ctucanfd_regs.h fake_core.h check.h $(wildcard shim/*.h shim/*/*.h)
 DRV     := $(SRC)/dev-can-ctucanfd.c $(SRC)/ctucanfd_devctl.h fake_libcan.c fake_libcan.h
-TESTS   := test_dlc_timing test_frames test_core test_driver
+TESTS   := test_dlc_timing test_frames test_core test_driver test_supervisor
 
 all: $(addprefix $(BUILD)/,$(TESTS))
 
@@ -25,6 +25,10 @@ $(BUILD)/%: %.c $(HW) $(HDRS) | $(BUILD)
 # includes the driver source; see the comment at the top of test_driver.c
 $(BUILD)/test_driver: test_driver.c $(HW) $(HDRS) $(DRV) | $(BUILD)
 	$(CC) $(CFLAGS) $(SAN) -o $@ $< $(HW) fake_libcan.c
+
+# includes tools/ctucan-supervisor.c with its spawn and sleep replaced
+$(BUILD)/test_supervisor: test_supervisor.c ../../tools/ctucan-supervisor.c $(HDRS) | $(BUILD)
+	$(CC) $(CFLAGS) $(SAN) -o $@ $<
 
 run: all
 	@for t in $(TESTS); do ./$(BUILD)/$$t || exit 1; done
