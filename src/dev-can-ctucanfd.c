@@ -249,7 +249,7 @@ static unsigned tx_retire(drv_t *d)
             d->stats.transmitted_frames++;
             d->x.tx_ok++;
             break;
-        case TXT_ERR:   /* retransmission limit, or bus-off on cores that fail buffers then */
+        case TXT_ERR:   /* no retransmission limit is set: bus-off, on cores that fail buffers then */
         case TXT_PER:
             d->x.tx_failed++;
             d->stats.total_frame_errors++;
