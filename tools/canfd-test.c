@@ -330,9 +330,9 @@ static int do_xstats(int fd)
            x.hw_pulses, x.deferred, x.unmask_err, x.rearm_pending, x.spurious, x.stopped_pulses, x.reports,
            x.notify_deferred, x.notify_stuck, x.rx_discarded, x.rx_max_batch, x.rx_flushes, x.rx_flushed);
     printf("xstats: tx_started %u tx_ok %u tx_failed %u tx_aborted %u tx_lost %u tx_order_err %u "
-           "tx_max_inflight %u tx_batches %u tx_abort_forced %u\n",
+           "tx_max_inflight %u tx_batches %u tx_abort_forced %u fi_pulses %u\n",
            x.tx_started, x.tx_ok, x.tx_failed, x.tx_aborted, x.tx_lost, x.tx_order_err, x.tx_max_inflight,
-           x.tx_batches, x.tx_abort_forced);
+           x.tx_batches, x.tx_abort_forced, x.fi_pulses);
     printf("xstats: ewl_up %u ewl_down %u busoff_recovered %u restarts %u restart_fail %u fault_state 0x%x "
            "busoff_hold %u ewl %u inflight %u fi_scenario %u fi_step %u\n",
            x.ewl_up, x.ewl_down, x.busoff_recovered, x.restarts, x.restart_fail, (x.state >> 16) & 7u,

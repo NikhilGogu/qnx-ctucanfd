@@ -113,6 +113,7 @@ struct ctucan_fi *ctucan_fi_create(void);
 int      ctucan_fi_start(struct ctucan_fi *fi, unsigned scenario, unsigned arg, unsigned arg2, uint64_t now_ms);
 bool     ctucan_fi_tick(struct ctucan_fi *fi, uint64_t now_ms);
 unsigned ctucan_fi_state(const struct ctucan_fi *fi);
+uint32_t ctucan_fi_pending(const struct ctucan_fi *fi);   /* injected INT_STAT bits not yet acknowledged */
 #endif
 
 #endif

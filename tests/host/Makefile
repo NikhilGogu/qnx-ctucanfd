@@ -12,7 +12,7 @@ SAN     ?= -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-fram
 HW      := $(SRC)/ctucanfd_hw.c fake_core.c
 HDRS    := $(SRC)/ctucanfd_hw.h $(SRC)/ctucanfd_regs.h fake_core.h check.h $(wildcard shim/*.h shim/*/*.h)
 DRV     := $(SRC)/dev-can-ctucanfd.c $(SRC)/ctucanfd_devctl.h fake_libcan.c fake_libcan.h
-TESTS   := test_dlc_timing test_frames test_core test_driver
+TESTS   := test_dlc_timing test_frames test_core test_driver test_fi
 
 all: $(addprefix $(BUILD)/,$(TESTS))
 
@@ -23,8 +23,13 @@ $(BUILD)/%: %.c $(HW) $(HDRS) | $(BUILD)
 	$(CC) $(CFLAGS) $(SAN) -o $@ $< $(HW)
 
 # includes the driver source; see the comment at the top of test_driver.c
-$(BUILD)/test_driver: test_driver.c $(HW) $(HDRS) $(DRV) | $(BUILD)
+$(BUILD)/test_driver: test_driver.c $(HW) $(HDRS) $(DRV) driver_harness.h | $(BUILD)
 	$(CC) $(CFLAGS) $(SAN) -o $@ $< $(HW) fake_libcan.c
+
+# the fault-injection build: the injector sits between the driver and the fake core
+FI      := $(SRC)/ctucanfd_fi.c fi_glue.c fake_core_fi.c fake_core.c
+$(BUILD)/test_fi: test_fi.c $(HW) $(HDRS) $(DRV) $(FI) driver_harness.h | $(BUILD)
+	$(CC) $(CFLAGS) -DCTUCAN_FI $(SAN) -o $@ $< $(SRC)/ctucanfd_hw.c fi_glue.c fake_core_fi.c fake_libcan.c
 
 run: all
 	@for t in $(TESTS); do ./$(BUILD)/$$t || exit 1; done

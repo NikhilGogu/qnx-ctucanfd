@@ -633,7 +633,9 @@ static CANDEV *next_report(drv_t *d)
     return NULL;
 }
 
-static void finish_pulse(drv_t *d)
+/* `unmask` is false for a fault-injection tick (CTUCAN_FI): no interrupt was
+ * masked for it, so it only re-arms the core's output. */
+static void finish_pulse(drv_t *d, bool unmask)
 {
     /* RBNEI stays set while reader notifications are left, so the core
      * interrupts again and the next pulse continues them. Once they are done
@@ -651,7 +653,7 @@ static void finish_pulse(drv_t *d)
      * controller treats a line that is already asserted when it is unmasked
      * (section 3.3). */
     suppress(d);
-    if (InterruptUnmask(0, d->iid) == -1 && d->x.unmask_err++ == 0) {
+    if (unmask && InterruptUnmask(0, d->iid) == -1 && d->x.unmask_err++ == 0) {
         can_slogf(SLOG2_ERROR, DRV_NAME ": InterruptUnmask: %s", strerror(errno));
     }
     if (!d->hw_started) {
@@ -670,6 +672,21 @@ static void finish_pulse(drv_t *d)
     unsuppress(d);
 }
 
+/* The start of an interrupt pulse, after the fault-injection script has
+ * advanced: one bounded batch of service, then the reader notifications are
+ * counted from here. */
+static void pulse_begin(drv_t *d)
+{
+    d->in_event = true;
+    d->notify_left = false;
+    if (d->hw_started) {
+        service(d);
+    }
+    d->reports_left = d->report_budget;
+    d->rep_stuck = 0;
+    d->last_rep = NULL;
+}
+
 static CANDEV *cb_event(void *const hdl, const int code)
 {
     drv_t *d = hdl;
@@ -680,15 +697,8 @@ static CANDEV *cb_event(void *const hdl, const int code)
             return NULL;
         }
         d->x.hw_pulses++;
-        d->in_event = true;
-        d->notify_left = false;
         fi_tick(d);
-        if (d->hw_started) {
-            service(d);
-        }
-        d->reports_left = d->report_budget;
-        d->rep_stuck = 0;
-        d->last_rep = NULL;
+        pulse_begin(d);
     }
     CANDEV *c;
     while ((c = next_report(d)) != NULL) {
@@ -699,7 +709,7 @@ static CANDEV *cb_event(void *const hdl, const int code)
 #endif
         return c;
     }
-    finish_pulse(d);
+    finish_pulse(d, true);
     d->in_event = false;
     return NULL;
 }
@@ -715,24 +725,27 @@ static void fi_tick(drv_t *d)
 }
 
 /* CTUCAN_DEVCTL_FI_TICK, sent by a test client every millisecond while a
- * scenario runs: advances the script and handles the injected error and TX
- * events. RX is left to interrupt pulses, which also wake the readers. */
+ * scenario runs. Injected status never reaches the interrupt line, so when
+ * the script has some pending the tick runs the pulse path itself: the same
+ * service() batch and finish_pulse(), without the unmask. A devctl cannot
+ * hand mailboxes back to libcan, so readers that frames reached here are
+ * left to the next interrupt pulse: RBNEI stays set for it. */
 static void fi_devctl_tick(drv_t *d)
 {
     fi_tick(d);
-    if (!d->hw_started) {
+    if (d->in_event || !d->hw_started || (ctucan_fi_pending(d->hw.fi) & d->int_ena) == 0) {
         return;
     }
-    uint32_t st = ctucan_rd(&d->hw, CTUCAN_INT_STAT) & d->int_ena & (INT_TXBHCI | INT_EWLI | INT_FCSI | INT_BEI);
-    if (st & (INT_EWLI | INT_FCSI | INT_BEI)) {
-        ctucan_wr(&d->hw, CTUCAN_INT_STAT, st & (INT_EWLI | INT_FCSI | INT_BEI));
-        error_event(d, st);
+    d->x.fi_pulses++;
+    pulse_begin(d);
+    for (unsigned i = 0; i < d->nrx; i++) {
+        CANDEV *c = &d->rx[i].cdev;
+        if (c->msg_queue->msgcnt > 0 && c->wait_client_queue->cnt > 0) {
+            d->notify_left = true;
+        }
     }
-    if (st & INT_TXBHCI) {
-        ctucan_wr(&d->hw, CTUCAN_INT_STAT, INT_TXBHCI);
-        tx_retire(d);
-        tx_kick(d);
-    }
+    finish_pulse(d, false);
+    d->in_event = false;
 }
 
 static int fi_request(drv_t *d, const ctucan_fi_req_t *r)

@@ -804,7 +804,9 @@ def t_fi_warn(t, bus):
     check(x["ewl_up"] == 1 and x["ewl_down"] == 1, f"ewl up {x['ewl_up']} down {x['ewl_down']}")
     check(s["warn"] == 1 and s["passive"] == 0 and s["bus_off"] == 0, f"stats {s}")
     check(x["fault_state"] == 1, f"fault state {x['fault_state']}")
-    return "ewl_up 1, ewl_down 1, warn 1, FAULT_STATE error active throughout"
+    check(x["fi_pulses"] >= 2 and x["unmask_err"] == 0, f"injected events not serviced by the pulse path: {x}")
+    return (f"ewl_up 1, ewl_down 1, warn 1, FAULT_STATE error active throughout; "
+            f"{x['fi_pulses']} ticks through service()")
 
 
 def t_fi_passive(t, bus):
@@ -839,6 +841,7 @@ def t_fi_busoff_auto(t, bus):
     x, s = t.xstats(), t.stats()
     check_seq_stream(got, 300, 16, "host side")
     check(s["bus_off"] == 1 and x["busoff_recovered"] == 1 and x["fault_state"] == 1, f"{s} {x}")
+    check(x["fi_pulses"] >= 1 and x["unmask_err"] == 0, f"injected events not serviced by the pulse path: {x}")
     return f"300/300 in order, bus_off 1, recovered 1, largest gap {max(gaps(got))} ms (1 ms pacing)"
 
 
@@ -918,6 +921,7 @@ def t_fi_txdelay(t, bus):
     x, log = t.xstats(), t.out("cat /tmp/td.log")
     check_seq_stream(got, 100, 16, "host side")
     check(x["tx_max_inflight"] == 4 and x["tx_order_err"] == 0, f"{x}")
+    check(x["fi_pulses"] >= 1 and x["unmask_err"] == 0, f"held completions not serviced by the pulse path: {x}")
     return f"100/100 in order, max in flight {x['tx_max_inflight']}, {log.strip()}"
 
 
