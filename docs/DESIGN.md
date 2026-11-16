@@ -183,7 +183,7 @@ Enabled interrupts: EWLI, FCSI, BEI, DOI (plus RBNEI and TXBHCI).
 - EWLI fires when the warning limit is reached and when both counters fall below it again (datasheet). The driver follows STATUS.EWL for this, apart from FAULT_STATE, so a warning that leaves FAULT_STATE at error active is still counted (`error_warning_state_count`, `ewl_up`, `ewl_down`).
 - FCSI: FAULT_STATE (error active, error passive, bus-off) is compared with the last state; error passive and bus-off are counted and logged with TEC and REC.
 - Bus-off policy: TX admission stops at once and stays stopped until FAULT_STATE reads error active; a reading of none or of error passive does not release it (`fi_busoff_latch`: the hold was still set 60 ms in while FAULT_STATE read passive, and the stream showed one 106 ms gap). Frames in TXT buffers are aborted, and the driver waits for those aborts at the point of bus-off, at most 20 ms; what is still not final then is given up and counted (`tx_abort_forced`). No later traffic or timer is needed for that: `fi_busoff_abort_notick` runs with no fault-injection ticker and no traffic, and `fi_busoff_stuck_abort` with recovery afterwards. Frames in libcan's queues stay queued, and once a queue is full writers get EAGAIN from libcan. Recovery: with `-a` the driver writes COMMAND.ERCRST at once (the core rejoins after 128 times 11 recessive bits); without it the core stays bus-off until `CTUCAN_DEVCTL_RECOVER` or a `SET_TIMING` restart.
-- A TXT buffer that ends in "TX failed" (retransmission limit) is retired and counted as a frame error.
+- A TXT buffer that ends in "TX failed" is retired and counted as a frame error. The driver sets no retransmission limit: SETTINGS.RTRLE stays 0 and no threshold is written, so the core retransmits a frame until it is sent. "TX failed" can then come only from bus-off, on cores that fail their TXT buffers at bus-off. With no other node to acknowledge, an error-passive transmitter's error counter stops rising on ACK errors (ISO 11898-1 fault confinement), so it never goes bus-off, and the frame is retransmitted, with a bus error interrupt for each attempt, until the driver aborts it (restart or shutdown).
 
 QEMU 6.2 models none of this (section 1), so the fault-injection build (`make FI=1`, `src/ctucanfd_fi.c`) overlays scripted values on the registers the service loop reads (INT_STAT, STATUS.EWL, FAULT_STATE, REC/TEC, TX_STATUS, YOLO, RX_DATA) and watches the commands it writes (COMMAND.ERCRST, TX_COMMAND, MODE.RST, INT_STAT acks). The script advances on every interrupt pulse and on `CTUCAN_DEVCTL_FI_TICK`, which a test client (`canfd-test fitick`) sends every millisecond. Scenario OFF and a soft reset of the core clear every overlay (`fi_state_clear`). The normal build answers the fault-injection devctls like any unknown command, with ENOTTY (`fi_rejected_normal`).
 
@@ -233,6 +233,7 @@ The codelab (`codelab/qnx-canfd-qemu.md`) walks through the same setup by hand.
 ## 11. Known limits
 
 - Tested in QEMU 6.2 only. QEMU has no bit timing, error counters, fault confinement or bus timing.
+- No retransmission limit is set, so a frame nobody acknowledges is retransmitted until it is aborted, and each attempt raises a bus error interrupt on libcan's thread (section 8).
 - The error and bus-off paths are tested only through the fault injector, which plays scripted register sequences to the driver (section 8).
 - The driver compiles and links for aarch64le; it has not run on ARM, and register access ordering and posted-write completion on ARM have not been reviewed.
 - One active core per board: both cores of QEMU's board drive one interrupt line, and each core raises or lowers it on its own, so two driver instances on one board can lose interrupts. A second node needs a second board.
@@ -269,6 +270,7 @@ Each row is a defect found in an earlier version of the driver or its tools, how
 | The normal build accepted the fault-injection devctls | It answers them like any unknown command | `fi_rejected_normal` |
 | The supervisor trusted the path name, waited for ever and ignored spawn failures | It checks the server pid and a bounded `GET_INFO`, kills and restarts on timeout, and counts spawn failures | `supervisor_readiness` |
 | The supervisor's readiness probe could hang on a server that never replies | The probe runs in a forked child that is abandoned at 200 ms | `supervisor_hang` |
+| A SIGTERM during the supervisor's restart delay still started a driver | The loop checks the stop flag again after the delay | `tests/host/test_supervisor.c`; not run on a target |
 | A failed copy could leave an old binary on the target | The gate test and the suite compare the md5 on the target with the build after every copy | every run |
 
 Still open:
@@ -276,6 +278,6 @@ Still open:
 - ARM register access ordering is not reviewed, and the aarch64le build has not run (section 11).
 - Interrupt pulses are not authenticated (section 11); `spoofed_irq_pulse` shows the refused unmask.
 - Devctl latency has no upper bound (sections 3.2, 11), and bus-off and a `SET_TIMING` restart wait for TXT buffer aborts on libcan's thread (sections 5 and 8).
-- No test overruns the RX FIFO, so the DOR-before-DOI order is in the code but untested.
+- No end-to-end test overruns the RX FIFO; the DOR-before-DOI order is checked only by the host unit tests (`test_driver`).
 - The unwinding of a partial start-up is not exercised by a test.
 - Hardware acceptance filters (section 4.1) and an explicit interrupt thread (section 3.4) are not done.

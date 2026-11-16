@@ -185,6 +185,9 @@ int main(int argc, char *argv[])
         if (delay_ms != 0) {
             logf_("restarting in %u ms", delay_ms);
             usleep(delay_ms * 1000u);
+            if (g_stop) {
+                break;  /* SIGTERM during the delay: start nothing */
+            }
         }
         pid_t pid;
         uint64_t t0 = now_us();

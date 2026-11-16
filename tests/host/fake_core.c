@@ -14,6 +14,7 @@ static void fake_reset(void)
 {
     memset(fake.mem, 0, sizeof(fake.mem));
     fake.mem[CTUCAN_MODE / 4] = MODE_FDE;  /* reset value QEMU 6.2 shows (docs/DESIGN.md, section 1) */
+    fake.mem[CTUCAN_EWL_ERP_FAULT / 4] = FS_ERA | 96u;  /* error active, warning limit 96 */
     fake.rx_head = fake.rx_used = fake.rx_frames = 0;
     rx_nlen = rx_left = 0;
     for (unsigned b = 0; b < CTUCAN_TXT_BUFFERS; b++) {
@@ -39,6 +40,7 @@ void fake_rx_push(const uint32_t *w, unsigned words)
     }
     rx_len[rx_nlen++] = words;
     fake.rx_frames++;
+    fake.mem[CTUCAN_INT_STAT / 4] |= INT_RBNEI;
 }
 
 static uint32_t rx_pop(void)
@@ -91,6 +93,9 @@ uint32_t ctucan_rd(const ctucan_hw_t *hw, uint32_t off)
     case CTUCAN_INT_ENA_SET:
     case CTUCAN_INT_ENA_CLR:
         return fake.int_ena;
+    case CTUCAN_INT_STAT:
+        /* datasheet: RBNEI is set again at once while the RX FIFO is not empty */
+        return fake.mem[off / 4] | fake.int_storm | (fake.rx_frames > 0 ? INT_RBNEI : 0);
     default:
         return fake.mem[off / 4];
     }
@@ -117,6 +122,9 @@ void ctucan_wr(const ctucan_hw_t *hw, uint32_t off, uint32_t val)
         break;
     case CTUCAN_INT_ENA_CLR:
         fake.int_ena &= ~val;
+        break;
+    case CTUCAN_INT_STAT:
+        fake.mem[off / 4] &= ~val;  /* write 1 to clear */
         break;
     case CTUCAN_COMMAND:
         if (val & CMD_RRB) {

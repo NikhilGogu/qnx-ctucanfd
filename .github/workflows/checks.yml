@@ -39,9 +39,11 @@ jobs:
           shellcheck --severity=warning --exclude=SC1090,SC2034,SC2088 \
             scripts/*.sh codelab/dryrun/*.sh
 
-  # The hardware layer (src/ctucanfd_hw.c) built with the host compiler
-  # against a fake core: DLC tables, bit timing, TXT buffer encoding, RX
-  # format-word checks, start and reset sequences (docs/TESTS.md).
+  # The hardware layer (src/ctucanfd_hw.c) and the driver
+  # (src/dev-can-ctucanfd.c) built with the host compiler against a fake core
+  # and a fake libcan: bit timing, TXT buffer encoding, RX format-word checks,
+  # start and reset sequences, the TX ring, error states, interrupt service,
+  # reader wake-ups and devctls (docs/TESTS.md).
   host-tests:
     runs-on: ubuntu-latest
     steps:
