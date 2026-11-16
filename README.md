@@ -2,9 +2,9 @@
 
 Run your CAN FD application on QNX 8.0 in QEMU, with no board.
 
-[Demo video](https://youtu.be/cFywX90Fi-M) | [Codelab: Test CAN FD software on QNX 8.0 in QEMU, no hardware needed](https://nikhil-qnx-codelabs.pages.dev/qnx-canfd-qemu/) | [Design](docs/DESIGN.md) | [Test results](docs/test-results.txt)
+[Demo video](https://youtu.be/cFywX90Fi-M) | [Codelab: Test CAN FD software on QNX 8.0 in QEMU, no CAN board needed](https://nikhil-qnx-codelabs.pages.dev/qnx-canfd-qemu/) | [Design](docs/DESIGN.md) | [Test results](docs/test-results.txt)
 
-`dev-can-ctucanfd` is a native QNX 8.0 driver for the CTU CAN FD IP core, built on the QNX CAN DDK (`libcan`). QEMU emulates a PCI board carrying this core (`ctucan_pci`), so CAN and CAN FD software for QNX can be developed and tested in a virtual machine, talking to Linux SocketCAN tools (`candump`, `cansend`) on the host. The driver gives QNX applications the usual libcan devices, `/dev/can1/rx0` and `/dev/can1/tx1`, with 64-byte CAN FD payloads. It is an ordinary QNX process; `ctucan-supervisor` starts it again when it dies (restart gaps: [docs/TESTS.md](docs/TESTS.md)).
+`dev-can-ctucanfd` is a native QNX 8.0 driver for the CTU CAN FD IP core, built on the QNX CAN DDK (`libcan`). QEMU emulates a PCI board carrying this core (`ctucan_pci`), so CAN and CAN FD software for QNX can be developed and tested in a virtual machine, talking to Linux SocketCAN tools (`candump`, `cansend`) on the host. The driver gives QNX applications the usual libcan devices, `/dev/can1/rx0` and `/dev/can1/tx1`, with 64-byte CAN FD payloads. It is an ordinary QNX process, and `ctucan-supervisor` starts it again when it dies. In `restart_under_load` the driver was killed three times under load and telemetry resumed each time; frames in the dead driver's queues are lost ([docs/TESTS.md](docs/TESTS.md)).
 
 Status (v0.2.0): tested in QEMU 6.2 with QNX SDP 8.0 on x86_64, also with two QNX nodes on one virtual CAN bus. 41 of 41 end-to-end tests pass ([docs/test-results.txt](docs/test-results.txt)). It compiles and links for aarch64le. It has not run on ARM or on CTU CAN FD silicon.
 
@@ -54,7 +54,7 @@ The full test suite (build, gate test and 41 tests) runs with `scripts/test-suit
 
 - **Resource manager on the CAN DDK.** `src/dev-can-ctucanfd.c` registers its callbacks with libcan (`can_resmgr_init`, `can_resmgr_init_device`, `can_resmgr_create_device`, `can_resmgr_start`), which runs the QNX resource manager loop. Clients use plain `open`, `read`, `write` and `devctl` on `/dev/can1/rx0` and `/dev/can1/tx1`, and the stock `canctl` works.
 - **Standard CAN devctls.** `cb_devctl` answers the `CAN_DEVCTL_*` commands, for example `GET_INFO`, `GET_STATS`, `SET_MID`, `SET_TIMING`, `WRITE_CANMSG_EXT` and `READ_CANMSG_EXT`. Driver-specific devctls are in `src/ctucanfd_devctl.h`.
-- **Interrupts as pulses, in bounded batches.** `can_resmgr_attach_intr()` ties the IRQ to one pulse code, and libcan calls the driver's `event_handler` on the resource manager thread, so the driver state needs no locks. Each pulse moves at most 64 frames from the RX FIFO, makes at most 8 passes over the interrupt status and returns at most 64 mailboxes to libcan (`RX_BUDGET`, `PASS_LIMIT`, `REPORT_BUDGET`), then calls `InterruptUnmask()` once. Work left over keeps an interrupt bit pending, so the next pulse continues it. See `docs/DESIGN.md`, section 3.
+- **Interrupts as pulses, in bounded batches.** `can_resmgr_attach_intr()` ties the IRQ to one pulse code, and libcan calls the driver's `event_handler` on the resource manager thread, so the driver state needs no locks. Each pulse moves at most 64 frames from the RX FIFO, makes at most 8 passes over the interrupt status and returns at most 64 mailboxes to libcan (`RX_BUDGET`, `PASS_LIMIT`, `REPORT_BUDGET`), then calls `InterruptUnmask()` once. Work left over keeps an interrupt bit pending, so the next pulse continues it. Between pulses libcan's thread is back in its message loop, and which waiting message it takes first depends on the priorities of the pulse and the client, so devctl latency has no upper bound (Limitations). See `docs/DESIGN.md`, section 3.
 - **PCI attach.** `pci_device_find`, `pci_device_attach` (exclusive owner), `pci_device_read_ba` and `pci_device_read_irq` find the board; the core's registers are mapped with `mmap_device_memory` and `PROT_NOCACHE`.
 - **Around the driver.** `tools/ecu-sim.c` sends its telemetry from a `SCHED_FIFO` thread with absolute `clock_nanosleep` deadlines. `tools/ctucan-supervisor.c` starts the driver with `posix_spawn` and counts it ready only when the process it started answers a `CAN_DEVCTL_GET_INFO` message. The driver logs to slog2.
 
@@ -80,7 +80,7 @@ This is a test fixture path, QEMU only. Production CAN controllers such as FlexC
 | `docs/DESIGN.md` | How it works and what was measured |
 | `docs/TESTS.md`, `docs/test-results.txt` | What the 41 tests cover, the measurements, and the recorded run |
 | `NOTICE` | Where the register map comes from |
-| `codelab/` | QNX codelab "Test CAN FD software on QNX 8.0 in QEMU, no hardware needed" and its dry runs |
+| `codelab/` | QNX codelab "Test CAN FD software on QNX 8.0 in QEMU, no CAN board needed" and its dry runs |
 
 ## The emulated hardware
 

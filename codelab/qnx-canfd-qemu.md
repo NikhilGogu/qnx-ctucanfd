@@ -1,5 +1,5 @@
 id: qnx-canfd-qemu
-title: Test CAN FD software on QNX 8.0 in QEMU, no hardware needed
+title: Test CAN FD software on QNX 8.0 in QEMU, no CAN board needed
 summary: Boot QNX OS 8.0 in QEMU with an emulated CTU CAN FD board, run a native QNX CAN FD driver for it, exchange 64-byte frames with Linux SocketCAN tools, run a simulated ECU, kill the driver and watch a supervisor bring it back, and join two QNX nodes on one virtual CAN bus.
 categories: qnx, automotive, codelabs
 tags: intermediate
@@ -9,7 +9,7 @@ authors: Nikhil Reddy Gogu, Yashaswin Puranik
 feedback_link: https://github.com/NikhilGogu/qnx-ctucanfd/issues
 
 
-# Test CAN FD software on QNX 8.0 in QEMU, no hardware needed
+# Test CAN FD software on QNX 8.0 in QEMU, no CAN board needed
 
 ## What you will build
 Duration: 2:00

@@ -1,6 +1,6 @@
 # ctucanfd: design
 
-`dev-can-ctucanfd` v0.2.0 is a native QNX 8.0 CAN driver, built on the CAN DDK (`libcan.a`), for the CTU CAN FD IP core on PCI. QEMU emulates that board as `ctucan_pci`, so CAN and CAN FD software for QNX can run in QEMU with no hardware and talk to host tools over SocketCAN. The only other QEMU CAN path for QNX that we found, dev-can-linux, runs Linux SJA1000 drivers (kvaser_pci), which cannot carry CAN FD.
+`dev-can-ctucanfd` v0.2.0 is a native QNX 8.0 CAN driver, built on the CAN DDK (`libcan.a`), for the CTU CAN FD IP core on PCI. QEMU emulates that board as `ctucan_pci`, so CAN and CAN FD software for QNX can run in QEMU with no CAN board and talk to host tools over SocketCAN. The only other QEMU CAN path for QNX that we found, dev-can-linux, runs Linux SJA1000 drivers (kvaser_pci), which cannot carry CAN FD.
 
 Measurements ran on one Linux host (Ubuntu 22.04, QEMU 6.2.0) against a QNX 8.0 x86_64 target built with mkqnximage.
 
@@ -102,7 +102,7 @@ The CAN DDK documents the interrupt contract: `can_resmgr_attach_intr()` "associ
 
 Each interrupt pulse does one bounded batch: at most 64 frames moved from the RX FIFO, at most 8 passes over INT_STAT, at most 64 RX mailbox returns to libcan, and the TXT buffers that have finished (four at most, judged from one TX_STATUS snapshot per pass, never cut short by the RX budget). The pulse ends with exactly one `InterruptUnmask(0, iid)`, checked (`unmask_err`). The driver uses one pulse code and sends no pulses itself.
 
-Work that is left over stays visible to the core as a pending interrupt status bit. Frames left in the FIFO keep RBNEI set (the core sets it again while the FIFO is not empty). Reader notifications left over keep RBNEI set too: the driver acknowledges RBNEI only after the pulse's mailbox returns are done (`notify_deferred` counts the pulses that held it). TX completions that arrive during the batch set TXBHCI again. Before the unmask the driver turns the core's interrupt output off (INT_ENA_CLR; the output is INT_STAT AND INT_ENA, INT_MASK only stops bits latching, datasheet 2.12 and QEMU's `ctucan_update_irq()`), and after it turns the output on again, so any pending bit raises the line afresh and the kernel delivers the next pulse. Between two pulses libcan's thread returns to its message loop and serves clients.
+Work that is left over stays visible to the core as a pending interrupt status bit. Frames left in the FIFO keep RBNEI set (the core sets it again while the FIFO is not empty). Reader notifications left over keep RBNEI set too: the driver acknowledges RBNEI only after the pulse's mailbox returns are done (`notify_deferred` counts the pulses that held it). TX completions that arrive during the batch set TXBHCI again. Before the unmask the driver turns the core's interrupt output off (INT_ENA_CLR; the output is INT_STAT AND INT_ENA, INT_MASK only stops bits latching, datasheet 2.12 and QEMU's `ctucan_update_irq()`), and after it turns the output on again, so any pending bit raises the line afresh and the kernel delivers the next pulse. Between two pulses libcan's thread returns to its message loop. Whether a waiting client is served before the next pulse depends on the priorities of the pulse and of the client's message.
 
 Measured on tc (`docs/test-results.txt`):
 
