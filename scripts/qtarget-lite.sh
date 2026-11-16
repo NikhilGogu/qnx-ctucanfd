@@ -7,6 +7,8 @@
 set -uo pipefail
 N=${1:?name}; C=${2:?command}; shift 2
 D=${TARGETS:-$HOME/targets}/$N
+# No host key check: the target is a throwaway local QEMU image that gets a
+# new key on every rebuild, reached on the address mkqnximage gives it.
 O=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=5 -o BatchMode=yes)
 IP=$(cd "$D" && mkqnximage --getip 2>/dev/null | tail -1)
 case $C in
