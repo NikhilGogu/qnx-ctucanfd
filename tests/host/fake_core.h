@@ -36,6 +36,7 @@ typedef struct {
     uint32_t int_storm;                     /* INT_STAT bits set again as soon as they are cleared */
     uint32_t device_id;                     /* what DEVICE_ID reads */
     bool     reset_stuck;                   /* a soft reset never completes */
+    bool     posted;                        /* writes land at the next read, as PCI allows */
     unsigned rx_reads;                      /* RX_DATA words popped */
     fake_wr_t log[FAKE_LOG_MAX];            /* register writes, in order */
     unsigned nlog;

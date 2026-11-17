@@ -394,8 +394,23 @@ static void body_stopped(void)
     CHECK(fake.int_ena != 0, "output on after the restart");
 }
 
+/* PCI posts memory writes: the INT_ENA_CLR in finish_pulse() may still be
+ * on its way when the line is unmasked, unless a read from the core follows. */
+static void body_posted(void)
+{
+    fake.posted = true;
+    rx_frame(0x123, 8);
+    fake_pulse();
+    fake_pulse();
+    CHECK_EQ(stats().received_frames, 1);
+    CHECK_EQ(lc.unmasks, 2);
+    CHECK(lc.ena_off_at_every_unmask, "INT_ENA was 0x%x at InterruptUnmask()", lc.ena_at_unmask);
+    fake.posted = false;
+}
+
 static void test_service(void)
 {
+    CHECK_EQ(run("", body_posted), 0);
     CHECK_EQ(run("-q 128", body_service), 0);
     CHECK_EQ(run("", body_stopped), 0);
 }
