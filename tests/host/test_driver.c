@@ -468,6 +468,64 @@ static void test_reports(void)
     CHECK_EQ(run("", body_stuck), 0);
 }
 
+/* ---- retransmission limit and bus error interrupt --------------------- */
+
+static void body_retr_limit(void)
+{
+    uint32_t mode = fake.mem[CTUCAN_MODE / 4];
+
+    CHECK(mode & SET_RTRLE, "RTRLE set with -R 3");
+    CHECK_EQ((mode >> SET_RTRTH_SHIFT) & 0xfu, 3);
+
+    /* a frame nobody acknowledged ends in TX failed; the next one goes */
+    for (unsigned i = 0; i < 2; i++) {
+        CAN_MSG m = frame(0x700 + i, 8);
+        CHECK_EQ(fake_write(TX1, &m), 0);
+    }
+    fake.txt[0] = TXT_ERR;
+    irq(INT_TXBHCI);
+    fake_pulse();
+    ctucan_xstats_t x = xstats();
+    CHECK_EQ(x.tx_failed, 1);
+    CHECK_EQ(x.state & 0xffu, 1);
+    CHECK_EQ(stats().total_frame_errors, 1);
+}
+
+static void body_no_bei(void)
+{
+    CHECK_EQ(fake.int_ena & INT_BEI, 0);
+    CHECK(fake_last_write(CTUCAN_INT_MASK_SET) & INT_BEI, "BEI masked, so it does not latch");
+    CHECK(fake.int_ena & INT_FCSI, "fault confinement still reported");
+
+    /* even if BEI were latched, it is not serviced */
+    fake.mem[CTUCAN_ERR_CAPT / 4] = ERRT_ACK << 5;
+    irq(INT_BEI);
+    fake_pulse();
+    CHECK_EQ(stats().missing_ack, 0);
+    CHECK_EQ(xstats().spurious, 1);
+}
+
+static void body_defaults_one_shot(void)
+{
+    CHECK(fake.mem[CTUCAN_MODE / 4] & SET_RTRLE, "RTRLE set with -R 0");
+    CHECK_EQ((fake.mem[CTUCAN_MODE / 4] >> SET_RTRTH_SHIFT) & 0xfu, 0);
+}
+
+static void body_defaults(void)
+{
+    CHECK_EQ(fake.mem[CTUCAN_MODE / 4] & (SET_RTRLE | 0xfu << SET_RTRTH_SHIFT), 0);
+    CHECK(fake.int_ena & INT_BEI, "BEI on by default");
+}
+
+static void test_retr_limit(void)
+{
+    CHECK_EQ(run("", body_defaults), 0);
+    CHECK_EQ(run("-R 3", body_retr_limit), 0);
+    CHECK_EQ(run("-R 0", body_defaults_one_shot), 0);
+    CHECK_EQ(run("-R 16", body_defaults), EINVAL);
+    CHECK_EQ(run("-E", body_no_bei), 0);
+}
+
 /* ---- devctl ------------------------------------------------------------ */
 
 /* One byte short is refused with EINVAL; the full size is not. */
@@ -582,6 +640,7 @@ int main(void)
     test_error_states();
     test_service();
     test_reports();
+    test_retr_limit();
     test_devctl();
     return check_exit("test_driver");
 }

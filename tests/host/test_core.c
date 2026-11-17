@@ -105,6 +105,28 @@ static void test_start(void)
     CHECK_EQ(mode & (SET_ENA | MODE_BMM | SET_ILBP | SET_NISOFD), SET_ENA | MODE_BMM | SET_ILBP | SET_NISOFD);
 }
 
+static void test_retr_limit(void)
+{
+    const uint32_t ena = INT_RBNEI | INT_TXBHCI;
+    ctucan_hw_cfg_t cfg = { .fd = true };
+
+    CHECK_EQ(ctucan_bt_calc(100000000u, 500000u, 875, false, &cfg.nominal), 0);
+    CHECK_EQ(ctucan_bt_calc(100000000u, 2000000u, 750, true, &cfg.data), 0);
+    start_with(&cfg, ena);
+    uint32_t plain = fake_last_write(CTUCAN_MODE);
+    CHECK_EQ(plain & (SET_RTRLE | 0xfu << SET_RTRTH_SHIFT), 0);   /* default: retransmit without limit */
+
+    for (unsigned n = 0; n <= SET_RTRTH_MAX; n++) {
+        cfg.retr_limit = true;
+        cfg.retr_max = (uint8_t)n;
+        start_with(&cfg, ena);
+        uint32_t mode = fake_last_write(CTUCAN_MODE);
+        CHECK(mode & SET_RTRLE, "-R %u: RTRLE", n);
+        CHECK(((mode >> SET_RTRTH_SHIFT) & 0xfu) == n, "-R %u: RTRTH %u", n, (mode >> SET_RTRTH_SHIFT) & 0xfu);
+        CHECK_EQ(mode & ~(SET_RTRLE | 0xfu << SET_RTRTH_SHIFT), plain);
+    }
+}
+
 static void test_stop(void)
 {
     ctucan_hw_cfg_t cfg = { .fd = true };
@@ -125,6 +147,7 @@ int main(void)
     test_identify();
     test_reset();
     test_start();
+    test_retr_limit();
     test_stop();
     return check_exit("test_core");
 }

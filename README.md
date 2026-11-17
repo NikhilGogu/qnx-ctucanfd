@@ -167,6 +167,7 @@ Options (`dev-can-ctucanfd -h`):
 | `-b rate`, `-d rate`, `-k hz` | nominal bit rate (500000), data bit rate (2000000), core clock (100 MHz) |
 | `-C`, `-A`, `-S` | classic CAN only; every frame as CAN FD; no bit rate switch |
 | `-l`, `-L`, `-a` | internal loopback, listen only, automatic bus-off recovery |
+| `-R n`, `-E` | at most n retransmissions per frame, 0 to 15 (no limit); no bus error interrupt (on). On a bus that may have no other node to acknowledge, use both: otherwise one frame is retransmitted for ever and each attempt is an interrupt. Not tested on silicon; QEMU does not model retransmission |
 
 ## Use
 
