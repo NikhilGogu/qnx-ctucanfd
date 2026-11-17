@@ -66,7 +66,7 @@ typedef union {
     CAN_DEVCTL_ERROR  error;
     CAN_DEVCTL_TIMING timing;
     CAN_MSG           canmsg;
-    uint8_t           room[128];  /* the driver asserts its private replies fit */
+    uint8_t           room[112];  /* sizeof(CAN_DCMD_DATA) in QNX 8.0; the driver asserts its private replies fit */
 } CAN_DCMD_DATA;
 
 #define _DCMD_CAN   0x0c

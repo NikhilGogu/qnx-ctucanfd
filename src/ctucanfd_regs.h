@@ -60,7 +60,9 @@
 #define MODE_FDE        (1u << 4)   /* CAN FD frames allowed */
 #define MODE_ACF        (1u << 7)
 #define MODE_TSTM       (1u << 8)
-#define SET_RTRLE       (1u << 16)
+#define SET_RTRLE       (1u << 16)  /* retransmission limit on */
+#define SET_RTRTH_SHIFT 17u         /* SETTINGS [4:1]: retransmissions after the first attempt */
+#define SET_RTRTH_MAX   15u
 #define SET_ILBP        (1u << 21)  /* internal loopback */
 #define SET_ENA         (1u << 22)  /* controller on the bus */
 #define SET_NISOFD      (1u << 23)  /* non-ISO (Bosch) CAN FD CRC */

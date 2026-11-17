@@ -1,6 +1,7 @@
-# Host unit tests: the hardware layer (src/ctucanfd_hw.c) on a fake core, and
-# the driver (src/dev-can-ctucanfd.c) on that core with a fake libcan and the
-# stand-in headers in shim/. Any C11 compiler:
+# Host unit tests: the hardware layer (src/ctucanfd_hw.c) on a fake core, pure
+# helpers such as src/ctucanfd_time.h, and the driver (src/dev-can-ctucanfd.c)
+# on that core with a fake libcan and the stand-in headers in shim/. Any C11
+# compiler:
 #   make -C tests/host run
 # SAN= turns the sanitizers off where the toolchain has none.
 SRC     := ../../src
@@ -10,9 +11,9 @@ CFLAGS  := -std=gnu11 -O1 -g -Wall -Wextra -Werror -Wshadow \
 SAN     ?= -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer
 
 HW      := $(SRC)/ctucanfd_hw.c fake_core.c
-HDRS    := $(SRC)/ctucanfd_hw.h $(SRC)/ctucanfd_regs.h fake_core.h check.h $(wildcard shim/*.h shim/*/*.h)
+HDRS    := $(SRC)/ctucanfd_hw.h $(SRC)/ctucanfd_regs.h $(SRC)/ctucanfd_time.h fake_core.h check.h $(wildcard shim/*.h shim/*/*.h)
 DRV     := $(SRC)/dev-can-ctucanfd.c $(SRC)/ctucanfd_devctl.h fake_libcan.c fake_libcan.h
-TESTS   := test_dlc_timing test_frames test_core test_driver test_supervisor
+TESTS   := test_dlc_timing test_frames test_core test_time test_driver test_fi test_supervisor
 
 all: $(addprefix $(BUILD)/,$(TESTS))
 
@@ -23,8 +24,13 @@ $(BUILD)/%: %.c $(HW) $(HDRS) | $(BUILD)
 	$(CC) $(CFLAGS) $(SAN) -o $@ $< $(HW)
 
 # includes the driver source; see the comment at the top of test_driver.c
-$(BUILD)/test_driver: test_driver.c $(HW) $(HDRS) $(DRV) | $(BUILD)
+$(BUILD)/test_driver: test_driver.c $(HW) $(HDRS) $(DRV) driver_harness.h | $(BUILD)
 	$(CC) $(CFLAGS) $(SAN) -o $@ $< $(HW) fake_libcan.c
+
+# the fault-injection build: the injector sits between the driver and the fake core
+FI      := $(SRC)/ctucanfd_fi.c fi_glue.c fake_core_fi.c fake_core.c
+$(BUILD)/test_fi: test_fi.c $(HW) $(HDRS) $(DRV) $(FI) driver_harness.h | $(BUILD)
+	$(CC) $(CFLAGS) -DCTUCAN_FI $(SAN) -o $@ $< $(SRC)/ctucanfd_hw.c fi_glue.c fake_core_fi.c fake_libcan.c
 
 # includes tools/ctucan-supervisor.c with its spawn and sleep replaced
 $(BUILD)/test_supervisor: test_supervisor.c ../../tools/ctucan-supervisor.c $(HDRS) | $(BUILD)

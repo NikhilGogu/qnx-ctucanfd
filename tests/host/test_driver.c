@@ -6,111 +6,11 @@
  * file is included whole, with its main() renamed, so each case runs the real
  * start-up and shutdown and drives the driver only through the callbacks it
  * gave libcan: interrupt pulses, client writes and devctls. Driver state is
- * read for assertions and set directly only where noted (ring counters near
- * the wrap, the mailbox return budget that FI builds set).
+ * read for assertions and set directly only where noted (the TX ring
+ * position, the mailbox return budget that FI builds set, the time of the
+ * last register dump). The helpers are in driver_harness.h.
  */
-#include <errno.h>
-#include <stdint.h>
-#include <string.h>
-#include <unistd.h>
-#include "check.h"
-#include "fake_core.h"
-#include "fake_libcan.h"
-
-#define main drv_main
-#include "dev-can-ctucanfd.c"
-#undef main
-
-enum { RX0 = 0, TX1 = 1 };      /* dev_unit with the default -r 1 -t 1 */
-
-static int run(const char *args, void (*body)(void))
-{
-    memset(&g_drv, 0, sizeof(g_drv));
-#if defined(__GLIBC__)
-    optind = 0;                 /* glibc: start getopt() afresh */
-#else
-    optreset = 1;
-    optind = 1;
-#endif
-    return fake_run_driver(drv_main, args, body);
-}
-
-static CAN_MSG frame(uint32_t id, unsigned len)
-{
-    CAN_MSG m;
-
-    memset(&m, 0, sizeof(m));
-    m.mid = (id & 0x7ffu) << 18;
-    m.len = (uint8_t)len;
-    for (unsigned i = 0; i < len; i++) {
-        m.dat[i] = (uint8_t)(id + i);
-    }
-    return m;
-}
-
-static void irq(uint32_t bits)
-{
-    fake.mem[CTUCAN_INT_STAT / 4] |= bits;
-}
-
-/* A classic frame with an 11-bit id arrives in the RX FIFO. */
-static void rx_frame(uint32_t id, unsigned len)
-{
-    uint32_t w[4 + 2] = { 0 };
-    unsigned dw = (len + 3u) / 4u;
-
-    w[0] = len | ((3u + dw) << FFW_RWCNT_SHIFT);
-    w[1] = (id & 0x7ffu) << 18;
-    for (unsigned i = 0; i < len; i++) {
-        w[4 + i / 4] |= (uint32_t)(uint8_t)(id + i) << (8u * (i % 4u));
-    }
-    fake_rx_push(w, 4 + dw);
-}
-
-static ctucan_xstats_t xstats(void)
-{
-    ctucan_xstats_t x;
-
-    memset(&x, 0, sizeof(x));
-    CHECK_EQ(fake_devctl(RX0, CTUCAN_DEVCTL_GET_XSTATS, &x, 0, sizeof(x)), sizeof(x));
-    return x;
-}
-
-static CAN_DEVCTL_STATS stats(void)
-{
-    CAN_DEVCTL_STATS s;
-
-    memset(&s, 0, sizeof(s));
-    CHECK_EQ(fake_devctl(RX0, CAN_DEVCTL_GET_STATS, &s, 0, sizeof(s)), sizeof(s));
-    return s;
-}
-
-static uint32_t txt_id(unsigned b)
-{
-    return fake.mem[(CTUCAN_TXTB(b) + FRAME_IDW) / 4] >> 18;
-}
-
-static unsigned ercrst_writes(void)
-{
-    unsigned n = 0;
-
-    for (unsigned i = 0; i < fake.nlog; i++) {
-        n += fake.log[i].off == CTUCAN_COMMAND && (fake.log[i].val & CMD_ERCRST) != 0;
-    }
-    return n;
-}
-
-static void set_fault(uint32_t fs, unsigned tec)
-{
-    fake.mem[CTUCAN_EWL_ERP_FAULT / 4] = fs | 96u;
-    fake.mem[CTUCAN_REC_TEC / 4] = (uint32_t)tec << 16;
-    irq(INT_FCSI);
-}
-
-static bool busoff_hold(void)
-{
-    return (xstats().state >> 9) & 1u;
-}
+#include "driver_harness.h"
 
 /* ---- start and stop ---------------------------------------------------- */
 
@@ -216,8 +116,9 @@ static void test_tx_ring(void)
     CHECK_EQ(run("", body_tx_ring), 0);
 }
 
-/* Frames sent across the 2^32 wrap of the ring counters: each one is set
- * ready in some TXT buffer exactly once, in the order written. */
+/* Frames sent around the ring several times, starting at its last buffer:
+ * each one is set ready in some TXT buffer exactly once, in the order
+ * written. */
 static unsigned wrap_sent[64], wrap_nsent;
 
 static void body_tx_wrap(void)
@@ -225,10 +126,10 @@ static void body_tx_wrap(void)
     const unsigned total = 3 * g_drv.ntxb + 2;
     unsigned written = 0;
 
-    /* Driver state set directly: the ring counters one buffer set before the
-     * wrap. The first set fills every buffer, the queue fills behind it, and
-     * the refill after they finish crosses the wrap in one tx_kick(). */
-    g_drv.txb_head = g_drv.txb_tail = UINT32_MAX - g_drv.ntxb;
+    /* Driver state set directly: the ring starts at its last buffer. The
+     * first set fills every buffer, the queue fills behind it, and the refill
+     * after they finish goes past the end of the ring in one tx_kick(). */
+    g_drv.txb_head = g_drv.txb_tail = g_drv.ntxb - 1;
     wrap_nsent = 0;
     for (unsigned round = 0; round < 4 * total && wrap_nsent < total; round++) {
         while (written < total && lc.dev[TX1]->msg_queue->msgcnt < g_drv.ntxb) {
@@ -258,7 +159,6 @@ static void body_tx_wrap(void)
         fake_pulse();
     }
     ctucan_xstats_t x = xstats();
-    CHECK(g_drv.txb_head < 16u, "ring counters wrapped (head %u)", g_drv.txb_head);
     CHECK_EQ(wrap_nsent, total);
     for (unsigned i = 0; i < wrap_nsent; i++) {
         CHECK(wrap_sent[i] == 0x200 + i, "ntxb %u: frame %u sent as 0x%x", g_drv.ntxb, i, wrap_sent[i]);
@@ -271,7 +171,7 @@ static void body_tx_wrap(void)
 
 static void test_tx_wrap(void)
 {
-    static const char *const args[] = { "-T 1", "-T 2", "-T 4" };
+    static const char *const args[] = { "-T 1", "-T 2", "-T 3", "-T 4" };
 
     for (unsigned i = 0; i < sizeof(args) / sizeof(args[0]); i++) {
         CHECK_EQ(run(args[i], body_tx_wrap), 0);
@@ -494,8 +394,23 @@ static void body_stopped(void)
     CHECK(fake.int_ena != 0, "output on after the restart");
 }
 
+/* PCI posts memory writes: the INT_ENA_CLR in finish_pulse() may still be
+ * on its way when the line is unmasked, unless a read from the core follows. */
+static void body_posted(void)
+{
+    fake.posted = true;
+    rx_frame(0x123, 8);
+    fake_pulse();
+    fake_pulse();
+    CHECK_EQ(stats().received_frames, 1);
+    CHECK_EQ(lc.unmasks, 2);
+    CHECK(lc.ena_off_at_every_unmask, "INT_ENA was 0x%x at InterruptUnmask()", lc.ena_at_unmask);
+    fake.posted = false;
+}
+
 static void test_service(void)
 {
+    CHECK_EQ(run("", body_posted), 0);
     CHECK_EQ(run("-q 128", body_service), 0);
     CHECK_EQ(run("", body_stopped), 0);
 }
@@ -568,13 +483,65 @@ static void test_reports(void)
     CHECK_EQ(run("", body_stuck), 0);
 }
 
-/* ---- devctl ------------------------------------------------------------ */
+/* ---- retransmission limit and bus error interrupt --------------------- */
 
-static int dc(unsigned dev, int dcmd, void *data, size_t in, size_t out)
+static void body_retr_limit(void)
 {
-    errno = 0;
-    return fake_devctl(dev, dcmd, data, in, out);
+    uint32_t mode = fake.mem[CTUCAN_MODE / 4];
+
+    CHECK(mode & SET_RTRLE, "RTRLE set with -R 3");
+    CHECK_EQ((mode >> SET_RTRTH_SHIFT) & 0xfu, 3);
+
+    /* a frame nobody acknowledged ends in TX failed; the next one goes */
+    for (unsigned i = 0; i < 2; i++) {
+        CAN_MSG m = frame(0x700 + i, 8);
+        CHECK_EQ(fake_write(TX1, &m), 0);
+    }
+    fake.txt[0] = TXT_ERR;
+    irq(INT_TXBHCI);
+    fake_pulse();
+    ctucan_xstats_t x = xstats();
+    CHECK_EQ(x.tx_failed, 1);
+    CHECK_EQ(x.state & 0xffu, 1);
+    CHECK_EQ(stats().total_frame_errors, 1);
 }
+
+static void body_no_bei(void)
+{
+    CHECK_EQ(fake.int_ena & INT_BEI, 0);
+    CHECK(fake_last_write(CTUCAN_INT_MASK_SET) & INT_BEI, "BEI masked, so it does not latch");
+    CHECK(fake.int_ena & INT_FCSI, "fault confinement still reported");
+
+    /* even if BEI were latched, it is not serviced */
+    fake.mem[CTUCAN_ERR_CAPT / 4] = ERRT_ACK << 5;
+    irq(INT_BEI);
+    fake_pulse();
+    CHECK_EQ(stats().missing_ack, 0);
+    CHECK_EQ(xstats().spurious, 1);
+}
+
+static void body_defaults_one_shot(void)
+{
+    CHECK(fake.mem[CTUCAN_MODE / 4] & SET_RTRLE, "RTRLE set with -R 0");
+    CHECK_EQ((fake.mem[CTUCAN_MODE / 4] >> SET_RTRTH_SHIFT) & 0xfu, 0);
+}
+
+static void body_defaults(void)
+{
+    CHECK_EQ(fake.mem[CTUCAN_MODE / 4] & (SET_RTRLE | 0xfu << SET_RTRTH_SHIFT), 0);
+    CHECK(fake.int_ena & INT_BEI, "BEI on by default");
+}
+
+static void test_retr_limit(void)
+{
+    CHECK_EQ(run("", body_defaults), 0);
+    CHECK_EQ(run("-R 3", body_retr_limit), 0);
+    CHECK_EQ(run("-R 0", body_defaults_one_shot), 0);
+    CHECK_EQ(run("-R 16", body_defaults), EINVAL);
+    CHECK_EQ(run("-E", body_no_bei), 0);
+}
+
+/* ---- devctl ------------------------------------------------------------ */
 
 /* One byte short is refused with EINVAL; the full size is not. */
 static void size_check(unsigned dev, int dcmd, void *data, size_t size, const char *name)
@@ -654,10 +621,17 @@ static void body_devctl(void)
     CHECK_EQ((fake.mem[CTUCAN_BTR / 4] >> BTR_BRP_SHIFT) & 0xffu, 8);
     CHECK_EQ(fake.mem[CTUCAN_MODE / 4] & SET_ENA, SET_ENA);
 
-    /* the rest */
+    /* the register dump: at most once a second, so no client can flood slog2 */
     unsigned lines = lc.slog_lines;
     CHECK_EQ(dc(RX0, CAN_DEVCTL_DEBUG_INFO, NULL, 0, 0), 0);
-    CHECK(lc.slog_lines - lines >= 16, "%u register lines", lc.slog_lines - lines);
+    unsigned dump = lc.slog_lines - lines;
+    CHECK(dump >= 16, "%u register lines", dump);
+    lines = lc.slog_lines;
+    CHECK(dc(TX1, CAN_DEVCTL_DEBUG_INFO2, NULL, 0, 0) == -1 && errno == EAGAIN, "second dump within a second");
+    CHECK_EQ(lc.slog_lines, lines);
+    g_drv.dump_ms -= 1000;  /* driver state set directly: the last dump a second ago */
+    CHECK_EQ(dc(RX0, CAN_DEVCTL_DEBUG_INFO, NULL, 0, 0), 0);
+    CHECK_EQ(lc.slog_lines - lines, dump);
     CHECK_EQ(dc(RX0, CAN_DEVCTL_ERROR, &d, 0, sizeof(d.error)), sizeof(d.error));
     CHECK_EQ(d.error.drvr1 & FS_MASK, FS_ERA);
     CHECK(dc(RX0, CTUCAN_DEVCTL_FI, &fi, sizeof(fi), 0) == -1 && errno == ENOTSUP, "FI on a normal build");
@@ -688,6 +662,7 @@ int main(void)
     test_error_states();
     test_service();
     test_reports();
+    test_retr_limit();
     test_devctl();
     return check_exit("test_driver");
 }

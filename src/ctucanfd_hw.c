@@ -30,6 +30,14 @@ unsigned ctucan_len2dlc(unsigned len)
     return 15;
 }
 
+ctucan_flags_t ctucan_tx_flags(bool fd_mode, bool fd_always, bool brs, unsigned len)
+{
+    ctucan_flags_t f = { .fdf = fd_mode && (fd_always || len > CAN_MSG_DATA_MAX_CAN) };
+
+    f.brs = f.fdf && brs;
+    return f;
+}
+
 int ctucan_hw_identify(const ctucan_hw_t *hw, unsigned *major, unsigned *minor)
 {
     uint32_t v = ctucan_rd(hw, CTUCAN_DEVICE_ID);
@@ -59,7 +67,7 @@ int ctucan_hw_reset(const ctucan_hw_t *hw)
 
 void ctucan_hw_start(const ctucan_hw_t *hw, const ctucan_hw_cfg_t *cfg, uint32_t int_ena)
 {
-    uint32_t mode = SET_ENA;
+    uint32_t mode = 0;
 
     ctucan_wr(hw, CTUCAN_INT_ENA_CLR, INT_ALL);
     /* Sources the driver does not service never latch in INT_STAT. */
@@ -82,7 +90,15 @@ void ctucan_hw_start(const ctucan_hw_t *hw, const ctucan_hw_cfg_t *cfg, uint32_t
     if (cfg->non_iso) {
         mode |= SET_NISOFD;
     }
+    if (cfg->retr_limit) {
+        /* without it the core retransmits a frame nobody acknowledges for ever */
+        mode |= SET_RTRLE | (uint32_t)(cfg->retr_max & SET_RTRTH_MAX) << SET_RTRTH_SHIFT;
+    }
+    /* Mode and settings are written while the core is still off the bus, and
+     * only a second write sets ENA, so the core never joins the bus with a
+     * configuration it has not taken yet. */
     ctucan_wr(hw, CTUCAN_MODE, mode);
+    ctucan_wr(hw, CTUCAN_MODE, mode | SET_ENA);
     ctucan_wr(hw, CTUCAN_INT_ENA_SET, int_ena);
 }
 

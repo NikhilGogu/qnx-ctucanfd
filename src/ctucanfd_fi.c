@@ -18,7 +18,9 @@
  * it. Scenario OFF and a soft reset of the core clear every overlay.
  *
  * The script advances in ctucan_fi_tick(), which the driver calls on every
- * interrupt pulse and on CTUCAN_DEVCTL_FI_TICK from a test client.
+ * interrupt pulse and on CTUCAN_DEVCTL_FI_TICK from a test client. Injected
+ * INT_STAT bits never reach the interrupt line; the driver asks for them with
+ * ctucan_fi_pending() on a tick and then runs its interrupt service.
  */
 #include <errno.h>
 #include <stdlib.h>
@@ -238,6 +240,11 @@ bool ctucan_fi_tick(struct ctucan_fi *fi, uint64_t now_ms)
         }
     }
     return !done || fi->held != 0 || fi->aborting != 0 || fi->int_stat != 0;
+}
+
+uint32_t ctucan_fi_pending(const struct ctucan_fi *fi)
+{
+    return fi->int_stat;
 }
 
 unsigned ctucan_fi_state(const struct ctucan_fi *fi)

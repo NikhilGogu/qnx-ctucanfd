@@ -11,6 +11,8 @@
  *   canfd-test seqsend DEV ID LEN COUNT GAP_US   sequenced frames (see below)
  *   canfd-test seqrecv DEV COUNT TIMEOUT_MS      check sequenced frames from the host
  *   canfd-test info DEV | xstats DEV | recover DEV
+ *   canfd-test fdstats DEV                 frames by format: classic, CAN FD, BRS, ESI
+ *   canfd-test time DEV [SET]              32-bit and 64-bit timestamps; SET sets the 32-bit one first
  *   canfd-test timing DEV BRP TS1 TS2 SJW
  *   canfd-test fi DEV SCENARIO [ARG ARG2 BUDGET FLAGS]   fault injection builds only
  *   canfd-test fitick DEV MS               drive a fault-injection script for MS ms
@@ -318,25 +320,67 @@ static int do_info(int fd)
 static int do_xstats(int fd)
 {
     ctucan_xstats_t x;
+    uint32_t fi_pulses = 0;     /* stays 0 on a normal build, which refuses the devctl */
     int rc = devctl(fd, CTUCAN_DEVCTL_GET_XSTATS, &x, sizeof(x), NULL);
 
     if (rc != EOK) {
         fprintf(stderr, "CTUCAN_DEVCTL_GET_XSTATS: %s\n", strerror(rc));
         return rc;
     }
+    (void)devctl(fd, CTUCAN_DEVCTL_FI_PULSES, &fi_pulses, sizeof(fi_pulses), NULL);
     printf("xstats: hw_pulses %u deferred %u unmask_err %u rearm_pending %u spurious %u stopped_pulses %u "
            "reports %u notify_deferred %u notify_stuck %u rx_discarded %u rx_max_batch %u rx_flushes %u "
            "rx_flushed %u\n",
            x.hw_pulses, x.deferred, x.unmask_err, x.rearm_pending, x.spurious, x.stopped_pulses, x.reports,
            x.notify_deferred, x.notify_stuck, x.rx_discarded, x.rx_max_batch, x.rx_flushes, x.rx_flushed);
     printf("xstats: tx_started %u tx_ok %u tx_failed %u tx_aborted %u tx_lost %u tx_order_err %u "
-           "tx_max_inflight %u tx_batches %u tx_abort_forced %u\n",
+           "tx_max_inflight %u tx_batches %u tx_abort_forced %u fi_pulses %u\n",
            x.tx_started, x.tx_ok, x.tx_failed, x.tx_aborted, x.tx_lost, x.tx_order_err, x.tx_max_inflight,
-           x.tx_batches, x.tx_abort_forced);
+           x.tx_batches, x.tx_abort_forced, fi_pulses);
     printf("xstats: ewl_up %u ewl_down %u busoff_recovered %u restarts %u restart_fail %u fault_state 0x%x "
            "busoff_hold %u ewl %u inflight %u fi_scenario %u fi_step %u\n",
            x.ewl_up, x.ewl_down, x.busoff_recovered, x.restarts, x.restart_fail, (x.state >> 16) & 7u,
            (x.state >> 9) & 1u, (x.state >> 8) & 1u, x.state & 0xffu, x.state >> 28, (x.state >> 24) & 0xfu);
+    return EOK;
+}
+
+static int do_fdstats(int fd)
+{
+    ctucan_fdstats_t f;
+    int rc = devctl(fd, CTUCAN_DEVCTL_GET_FDSTATS, &f, sizeof(f), NULL);
+
+    if (rc != EOK) {
+        fprintf(stderr, "CTUCAN_DEVCTL_GET_FDSTATS: %s\n", strerror(rc));
+        return rc;
+    }
+    printf("fdstats: rx_classic %u rx_fd %u rx_brs %u rx_esi %u tx_classic %u tx_fd %u tx_brs %u\n",
+           f.rx_classic, f.rx_fd, f.rx_brs, f.rx_esi, f.tx_classic, f.tx_fd, f.tx_brs);
+    return EOK;
+}
+
+/* Reads the 64-bit timestamp, then the 32-bit one, so the second is the later. */
+static int do_time(int fd, int argc, char *argv[])
+{
+    uint32_t t32;
+    uint64_t t64;
+    int rc;
+
+    if (argc > 3) {
+        t32 = (uint32_t)strtoul(argv[3], NULL, 0);
+        if ((rc = devctl(fd, CAN_DEVCTL_SET_TIMESTAMP, &t32, sizeof(t32), NULL)) != EOK) {
+            fprintf(stderr, "CAN_DEVCTL_SET_TIMESTAMP: %s\n", strerror(rc));
+            return rc;
+        }
+    }
+    if ((rc = devctl(fd, CTUCAN_DEVCTL_GET_TIMESTAMP64, &t64, sizeof(t64), NULL)) != EOK) {
+        fprintf(stderr, "CTUCAN_DEVCTL_GET_TIMESTAMP64: %s\n", strerror(rc));
+        return rc;
+    }
+    if ((rc = devctl(fd, CAN_DEVCTL_GET_TIMESTAMP, &t32, sizeof(t32), NULL)) != EOK) {
+        fprintf(stderr, "CAN_DEVCTL_GET_TIMESTAMP: %s\n", strerror(rc));
+        return rc;
+    }
+    printf("time: ts64 %llu ts32 %u\n", (unsigned long long)t64, t32);
     return EOK;
 }
 
@@ -609,7 +653,7 @@ static int do_tester(int rfd, int argc, char *argv[])
 int main(int argc, char *argv[])
 {
     if (argc < 3) {
-        fprintf(stderr, "usage: canfd-test send|write|recv|seqsend|seqrecv|info|xstats|recover|timing|fi|pulse|tester DEV ...\n");
+        fprintf(stderr, "usage: canfd-test send|write|recv|seqsend|seqrecv|info|xstats|fdstats|time|recover|timing|fi|pulse|tester DEV ...\n");
         return 1;
     }
     int fd = open(argv[2], O_RDWR);
@@ -633,6 +677,10 @@ int main(int argc, char *argv[])
         rc = do_info(fd);
     } else if (strcmp(cmd, "xstats") == 0) {
         rc = do_xstats(fd);
+    } else if (strcmp(cmd, "fdstats") == 0) {
+        rc = do_fdstats(fd);
+    } else if (strcmp(cmd, "time") == 0) {
+        rc = do_time(fd, argc, argv);
     } else if (strcmp(cmd, "recover") == 0) {
         rc = devctl(fd, CTUCAN_DEVCTL_RECOVER, NULL, 0, NULL);
         printf("CTUCAN_DEVCTL_RECOVER: %s\n", strerror(rc));

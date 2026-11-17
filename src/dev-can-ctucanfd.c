@@ -31,6 +31,7 @@
 #include <hw/libcan.h>
 #include "ctucanfd_hw.h"
 #include "ctucanfd_devctl.h"
+#include "ctucanfd_time.h"
 
 #define DRV_NAME        "dev-can-ctucanfd"
 #define MAX_RX_DEVS     16
@@ -41,11 +42,13 @@
 #define REPORT_BUDGET   64u     /* RX mailbox returns to libcan per pulse */
 #define TX_QUIESCE_MS   20u     /* wait for frames in flight, then as long again after an abort */
 #define STUCK_LIMIT     8u      /* pulses in a row a mailbox may be returned without waking anyone */
+#define DUMP_MS         1000u   /* at most one register dump per this many ms */
 
 #define container_of(p, type, member) ((type *)(void *)((char *)(p) - offsetof(type, member)))
 
 _Static_assert(sizeof(ctucan_xstats_t) <= sizeof(CAN_DCMD_DATA),
                "private replies must fit where the standard CAN devctl replies go");
+_Static_assert(sizeof(ctucan_fdstats_t) <= sizeof(CAN_DCMD_DATA), "FD statistics reply too large");
 
 typedef struct drv drv_t;
 
@@ -72,7 +75,7 @@ struct drv {
     /* options */
     unsigned pci_index, core, unit, nrx, ntx, msgq, waitq, ntxb;
     int      verbosity;
-    bool     fd, brs, fd_always, autobus, ext;
+    bool     fd, brs, fd_always, autobus, ext, no_bei;
     uint32_t clk_hz, bitrate, dbitrate;
     unsigned sp, dsp;
 
@@ -97,7 +100,8 @@ struct drv {
 
     /* TX */
     txslot_t txs[CTUCAN_TXT_BUFFERS];
-    unsigned txb_head, txb_tail;    /* running counters; buffer = counter % ntxb */
+    unsigned txb_head, txb_tail;    /* next TXT buffer to fill, oldest in flight */
+    unsigned txb_n;                 /* frames in TXT buffers */
     unsigned tx_rr;
     uint32_t tx_seq;
     bool     tx_stopped;            /* restart or shutdown in progress */
@@ -107,26 +111,35 @@ struct drv {
     bool     ewl;                   /* last STATUS.EWL, tracked apart from FAULT_STATE */
     bool     busoff_hold;           /* set at bus-off, cleared only by FAULT_STATE = error active */
 
-    int64_t          ts_delta;
+    uint32_t         ts_offset;     /* timestamps: ctucanfd_time.h */
+    uint64_t         dump_ms;       /* last register dump (DEBUG_INFO), now_ms() */
     CAN_DEVCTL_STATS stats;
     ctucan_xstats_t  x;
+    ctucan_fdstats_t fdx;
 
     mbox_t rx[MAX_RX_DEVS];
     mbox_t tx[MAX_TX_DEVS];
 
 #ifdef CTUCAN_FI
     bool fi_fixedprio, fi_nowake;
+    uint32_t fi_pulses;             /* CTUCAN_DEVCTL_FI_PULSES */
 #endif
 };
 
 static drv_t g_drv;
 
-static uint32_t now_us(const drv_t *d)
+static uint64_t mono_us(void)
 {
     struct timespec ts;
 
     clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (uint32_t)((int64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000 + d->ts_delta);
+    return (uint64_t)ts.tv_sec * 1000000u + (uint64_t)ts.tv_nsec / 1000u;
+}
+
+/* The 32-bit timestamp of frames and CAN_DEVCTL_GET_TIMESTAMP: wraps every 2^32 us. */
+static uint32_t now_us(const drv_t *d)
+{
+    return ctucan_ts32(mono_us(), d->ts_offset);
 }
 
 static uint64_t now_ms(void)
@@ -143,7 +156,7 @@ static void fi_tick(drv_t *d);
 
 static unsigned tx_inflight(const drv_t *d)
 {
-    return d->txb_head - d->txb_tail;
+    return d->txb_n;
 }
 
 static bool tx_admit(const drv_t *d)
@@ -159,7 +172,7 @@ static void tx_set_prio(drv_t *d)
         return;
     }
 #endif
-    ctucan_hw_tx_prio(&d->hw, d->ntxb, d->txb_tail % d->ntxb);
+    ctucan_hw_tx_prio(&d->hw, d->ntxb, d->txb_tail);
 }
 
 /* Takes the next queued frame, round robin across TX mailboxes. */
@@ -182,7 +195,7 @@ static void tx_kick(drv_t *d)
     unsigned ready = 0;
 
     while (tx_admit(d) && tx_inflight(d) < d->ntxb) {
-        unsigned b = d->txb_head % d->ntxb;
+        unsigned b = d->txb_head;
         if (!ctucan_txt_writable(ctucan_hw_txt_state(&d->hw, b))) {
             break;  /* its state change interrupt brings us back */
         }
@@ -201,8 +214,8 @@ static void tx_kick(drv_t *d)
             m.ext.is_extended_mid = t->ext;
             m.ext.is_remote_frame = 0;
         }
-        bool fdf = d->fd && (d->fd_always || m.len > CAN_MSG_DATA_MAX_CAN);
-        int rc = ctucan_hw_txt_write(&d->hw, b, &m, fdf, fdf && d->brs);
+        ctucan_flags_t f = ctucan_tx_flags(d->fd, d->fd_always, d->brs, m.len);
+        int rc = ctucan_hw_txt_write(&d->hw, b, &m, f.fdf, f.brs);
         if (rc != EOK) {
             d->x.tx_failed++;   /* refused by the hardware layer (format) */
             can_slogf(SLOG2_ERROR, DRV_NAME ": tx%u: dropped mid 0x%08x len %u%s: %s", t->cdev.dev_unit,
@@ -216,8 +229,15 @@ static void tx_kick(drv_t *d)
         s->ext = m.ext.is_extended_mid != 0;
         s->rtr = m.ext.is_remote_frame != 0;
         s->late = false;
-        d->txb_head++;
+        d->txb_head = (b + 1) % d->ntxb;
+        d->txb_n++;
         d->x.tx_started++;
+        if (f.fdf) {
+            d->fdx.tx_fd++;
+            d->fdx.tx_brs += f.brs;
+        } else {
+            d->fdx.tx_classic++;
+        }
         ready |= 1u << b;
         if (tx_inflight(d) > d->x.tx_max_inflight) {
             d->x.tx_max_inflight = tx_inflight(d);
@@ -241,7 +261,7 @@ static unsigned tx_retire(drv_t *d)
     unsigned n = 0;
 
     while (tx_inflight(d) > 0) {
-        unsigned b = d->txb_tail % d->ntxb;
+        unsigned b = d->txb_tail;
         unsigned st = TXT_STATE(ts, b);
 
         switch (st) {
@@ -267,8 +287,8 @@ static unsigned tx_retire(drv_t *d)
         default:
             /* Ready, in transmission or aborting. Later buffers have lower
              * priority, so one of them finishing first is an ordering fault. */
-            for (unsigned k = d->txb_tail + 1; k != d->txb_head; k++) {
-                unsigned o = k % d->ntxb;
+            for (unsigned k = 1; k < d->txb_n; k++) {
+                unsigned o = (b + k) % d->ntxb;
                 if (!d->txs[o].late && TXT_STATE(ts, o) == TXT_TOK) {
                     d->txs[o].late = true;
                     d->x.tx_order_err++;
@@ -276,7 +296,8 @@ static unsigned tx_retire(drv_t *d)
             }
             return n;
         }
-        d->txb_tail++;
+        d->txb_tail = (b + 1) % d->ntxb;
+        d->txb_n--;
         if (d->ntxb > 1) {
             tx_set_prio(d);
         }
@@ -293,8 +314,8 @@ static void tx_abort_inflight(drv_t *d)
     uint32_t ts = ctucan_rd(&d->hw, CTUCAN_TX_STATUS);
     unsigned mask = 0;
 
-    for (unsigned k = d->txb_tail; k != d->txb_head; k++) {
-        unsigned b = k % d->ntxb;
+    for (unsigned k = 0; k < d->txb_n; k++) {
+        unsigned b = (d->txb_tail + k) % d->ntxb;
         unsigned st = TXT_STATE(ts, b);
         if (st == TXT_RDY || st == TXT_TRAN) {
             mask |= 1u << b;
@@ -319,6 +340,7 @@ static void tx_force_retire(drv_t *d)
     d->x.tx_aborted += n;
     can_slogf(SLOG2_ERROR, DRV_NAME ": %u TXT buffer(s) did not finish or abort in time, dropped", n);
     d->txb_tail = d->txb_head;
+    d->txb_n = 0;
     if (d->ntxb > 1) {
         tx_set_prio(d);
     }
@@ -410,6 +432,13 @@ static unsigned rx_drain(drv_t *d, unsigned budget)
             break;
         }
         n++;
+        if (fl.fdf) {
+            d->fdx.rx_fd++;
+            d->fdx.rx_brs += fl.brs;
+            d->fdx.rx_esi += fl.esi;
+        } else {
+            d->fdx.rx_classic++;
+        }
         m.ext.timestamp = now_us(d);
         d->stats.received_frames++;
         rx_deliver(d, &m);
@@ -505,6 +534,9 @@ static void suppress(drv_t *d)
 {
     if (!d->suppressed) {
         ctucan_wr(&d->hw, CTUCAN_INT_ENA_CLR, d->int_ena);
+        /* The write is posted; a read from the core completes only after it,
+         * so the output is off before the caller unmasks the line. */
+        (void)ctucan_rd(&d->hw, CTUCAN_INT_ENA_SET);
         d->suppressed = true;
     }
 }
@@ -629,7 +661,9 @@ static CANDEV *next_report(drv_t *d)
     return NULL;
 }
 
-static void finish_pulse(drv_t *d)
+/* `unmask` is false for a fault-injection tick (CTUCAN_FI): no interrupt was
+ * masked for it, so it only re-arms the core's output. */
+static void finish_pulse(drv_t *d, bool unmask)
 {
     /* RBNEI stays set while reader notifications are left, so the core
      * interrupts again and the next pulse continues them. Once they are done
@@ -647,7 +681,7 @@ static void finish_pulse(drv_t *d)
      * controller treats a line that is already asserted when it is unmasked
      * (section 3.3). */
     suppress(d);
-    if (InterruptUnmask(0, d->iid) == -1 && d->x.unmask_err++ == 0) {
+    if (unmask && InterruptUnmask(0, d->iid) == -1 && d->x.unmask_err++ == 0) {
         can_slogf(SLOG2_ERROR, DRV_NAME ": InterruptUnmask: %s", strerror(errno));
     }
     if (!d->hw_started) {
@@ -666,6 +700,21 @@ static void finish_pulse(drv_t *d)
     unsuppress(d);
 }
 
+/* The start of an interrupt pulse, after the fault-injection script has
+ * advanced: one bounded batch of service, then the reader notifications are
+ * counted from here. */
+static void pulse_begin(drv_t *d)
+{
+    d->in_event = true;
+    d->notify_left = false;
+    if (d->hw_started) {
+        service(d);
+    }
+    d->reports_left = d->report_budget;
+    d->rep_stuck = 0;
+    d->last_rep = NULL;
+}
+
 static CANDEV *cb_event(void *const hdl, const int code)
 {
     drv_t *d = hdl;
@@ -676,15 +725,8 @@ static CANDEV *cb_event(void *const hdl, const int code)
             return NULL;
         }
         d->x.hw_pulses++;
-        d->in_event = true;
-        d->notify_left = false;
         fi_tick(d);
-        if (d->hw_started) {
-            service(d);
-        }
-        d->reports_left = d->report_budget;
-        d->rep_stuck = 0;
-        d->last_rep = NULL;
+        pulse_begin(d);
     }
     CANDEV *c;
     while ((c = next_report(d)) != NULL) {
@@ -695,7 +737,7 @@ static CANDEV *cb_event(void *const hdl, const int code)
 #endif
         return c;
     }
-    finish_pulse(d);
+    finish_pulse(d, true);
     d->in_event = false;
     return NULL;
 }
@@ -711,24 +753,27 @@ static void fi_tick(drv_t *d)
 }
 
 /* CTUCAN_DEVCTL_FI_TICK, sent by a test client every millisecond while a
- * scenario runs: advances the script and handles the injected error and TX
- * events. RX is left to interrupt pulses, which also wake the readers. */
+ * scenario runs. Injected status never reaches the interrupt line, so when
+ * the script has some pending the tick runs the pulse path itself: the same
+ * service() batch and finish_pulse(), without the unmask. A devctl cannot
+ * hand mailboxes back to libcan, so readers that frames reached here are
+ * left to the next interrupt pulse: RBNEI stays set for it. */
 static void fi_devctl_tick(drv_t *d)
 {
     fi_tick(d);
-    if (!d->hw_started) {
+    if (d->in_event || !d->hw_started || (ctucan_fi_pending(d->hw.fi) & d->int_ena) == 0) {
         return;
     }
-    uint32_t st = ctucan_rd(&d->hw, CTUCAN_INT_STAT) & d->int_ena & (INT_TXBHCI | INT_EWLI | INT_FCSI | INT_BEI);
-    if (st & (INT_EWLI | INT_FCSI | INT_BEI)) {
-        ctucan_wr(&d->hw, CTUCAN_INT_STAT, st & (INT_EWLI | INT_FCSI | INT_BEI));
-        error_event(d, st);
+    d->fi_pulses++;
+    pulse_begin(d);
+    for (unsigned i = 0; i < d->nrx; i++) {
+        CANDEV *c = &d->rx[i].cdev;
+        if (c->msg_queue->msgcnt > 0 && c->wait_client_queue->cnt > 0) {
+            d->notify_left = true;
+        }
     }
-    if (st & INT_TXBHCI) {
-        ctucan_wr(&d->hw, CTUCAN_INT_STAT, INT_TXBHCI);
-        tx_retire(d);
-        tx_kick(d);
-    }
+    finish_pulse(d, false);
+    d->in_event = false;
 }
 
 static int fi_request(drv_t *d, const ctucan_fi_req_t *r)
@@ -776,7 +821,7 @@ static int restart_controller(drv_t *d)
     }
     ctucan_hw_start(&d->hw, &d->cfg, d->int_ena);
     d->suppressed = false;
-    d->txb_head = d->txb_tail = 0;
+    d->txb_head = d->txb_tail = d->txb_n = 0;
     tx_set_prio(d);
     d->fs = ctucan_rd(&d->hw, CTUCAN_EWL_ERP_FAULT) & FS_MASK;
     d->ewl = (ctucan_rd(&d->hw, CTUCAN_STATUS) & STAT_EWL) != 0;
@@ -878,9 +923,15 @@ static int cb_devctl(CANDEV *cdev, io_devctl_t *msg)
         break;
     case CAN_DEVCTL_SET_TIMESTAMP:
         NEED(sizeof(in->timestamp));
-        d->ts_delta += (int64_t)in->timestamp - (int64_t)now_us(d);
+        d->ts_offset = ctucan_ts_offset_for(mono_us(), in->timestamp);
         rc = EOK;
         break;
+    case CTUCAN_DEVCTL_GET_TIMESTAMP64: {
+        uint64_t ts = ctucan_ts64(mono_us(), d->ts_offset);
+        memcpy(out, &ts, sizeof(ts));
+        rc = sizeof(ts);
+        break;
+    }
     case CAN_DEVCTL_GET_INFO: {
         CAN_DEVCTL_INFO *info = &out->info;
         memset(info, 0, sizeof(*info));
@@ -919,6 +970,13 @@ static int cb_devctl(CANDEV *cdev, io_devctl_t *msg)
         break;
     case CAN_DEVCTL_DEBUG_INFO:
     case CAN_DEVCTL_DEBUG_INFO2:
+        /* 17 slog2 lines a call: any client of any mailbox could otherwise
+         * push the lines that matter out of the log buffer */
+        if (d->dump_ms != 0 && now_ms() - d->dump_ms < DUMP_MS) {
+            rc = -EAGAIN;
+            break;
+        }
+        d->dump_ms = now_ms();
         dump_regs(d);
         rc = EOK;
         break;
@@ -948,6 +1006,10 @@ static int cb_devctl(CANDEV *cdev, io_devctl_t *msg)
         memcpy(out, &d->x, sizeof(d->x));
         rc = sizeof(d->x);
         break;
+    case CTUCAN_DEVCTL_GET_FDSTATS:
+        memcpy(out, &d->fdx, sizeof(d->fdx));
+        rc = sizeof(d->fdx);
+        break;
     case CTUCAN_DEVCTL_RECOVER:
         /* manual bus-off recovery when -a is not set; TX resumes once FAULT_STATE reads error active */
         if (d->fs & FS_BOF) {
@@ -964,6 +1026,10 @@ static int cb_devctl(CANDEV *cdev, io_devctl_t *msg)
     case CTUCAN_DEVCTL_FI_TICK:
         fi_devctl_tick(d);
         rc = EOK;
+        break;
+    case CTUCAN_DEVCTL_FI_PULSES:
+        memcpy(out, &d->fi_pulses, sizeof(d->fi_pulses));
+        rc = sizeof(d->fi_pulses);
         break;
 #endif
     default:
@@ -1000,6 +1066,8 @@ static void usage(void)
            "  -A        send every frame as CAN FD (default: only frames over 8 bytes)\n"
            "  -S        no bit rate switch in CAN FD frames\n"
            "  -l        internal loopback   -L  listen only   -a  automatic bus-off recovery\n"
+           "  -R n      at most n retransmissions per frame, 0 to 15 (default: no limit)\n"
+           "  -E        no bus error interrupt (errors not counted by type)\n"
            "  -v        more verbose slog2 output (repeat)\n",
            CTUCAN_PCI_VENDOR, CTUCAN_PCI_DEVICE);
 }
@@ -1007,6 +1075,7 @@ static void usage(void)
 static int parse_args(drv_t *d, int argc, char *argv[])
 {
     int c;
+    unsigned long retr = 0;
 
     d->nrx = d->ntx = 1;
     d->msgq = 64;
@@ -1020,7 +1089,7 @@ static int parse_args(drv_t *d, int argc, char *argv[])
     d->sp = 875;
     d->dsp = 750;
     d->unit = 0;
-    while ((c = getopt(argc, argv, "i:c:u:r:t:q:w:T:b:d:k:xCASlLavh")) != -1) {
+    while ((c = getopt(argc, argv, "i:c:u:r:t:q:w:T:b:d:k:R:xCASlLaEvh")) != -1) {
         switch (c) {
         case 'i': d->pci_index = strtoul(optarg, NULL, 0); break;
         case 'c': d->core = strtoul(optarg, NULL, 0); break;
@@ -1040,6 +1109,11 @@ static int parse_args(drv_t *d, int argc, char *argv[])
         case 'l': d->cfg.loopback = true; break;
         case 'L': d->cfg.listen_only = true; break;
         case 'a': d->autobus = true; break;
+        case 'E': d->no_bei = true; break;
+        case 'R':
+            retr = strtoul(optarg, NULL, 0);
+            d->cfg.retr_limit = true;
+            break;
         case 'v': d->verbosity++; break;
         default: usage(); return EINVAL;
         }
@@ -1049,6 +1123,11 @@ static int parse_args(drv_t *d, int argc, char *argv[])
         fprintf(stderr, DRV_NAME ": bad mailbox, queue or TXT buffer count\n");
         return EINVAL;
     }
+    if (retr > SET_RTRTH_MAX) {
+        fprintf(stderr, DRV_NAME ": -R takes 0 to %u retransmissions\n", SET_RTRTH_MAX);
+        return EINVAL;
+    }
+    d->cfg.retr_max = (uint8_t)retr;
     if (d->unit == 0) {
         d->unit = d->core + 1;
     }
@@ -1266,7 +1345,9 @@ int main(int argc, char *argv[])
         fprintf(stderr, DRV_NAME ": core did not come out of reset\n");
         goto fail;
     }
-    d->int_ena = INT_RBNEI | INT_DOI | INT_TXBHCI | INT_EWLI | INT_FCSI | INT_BEI;
+    /* With no node to acknowledge, every retransmission is a bus error; -E
+     * keeps those off libcan's thread. Fault confinement still interrupts. */
+    d->int_ena = INT_RBNEI | INT_DOI | INT_TXBHCI | INT_EWLI | INT_FCSI | (d->no_bei ? 0 : INT_BEI);
     d->budget = RX_BUDGET;
     d->report_budget = REPORT_BUDGET;
 

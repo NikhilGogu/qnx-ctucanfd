@@ -12,7 +12,7 @@ QTARGET=scripts/qtarget-lite.sh scripts/test-suite.sh tc vcan0
 
 [Demo video](https://youtu.be/cFywX90Fi-M) | [Codelab: Test CAN FD software on QNX 8.0 in QEMU, no CAN board needed](https://nikhil-qnx-codelabs.pages.dev/qnx-canfd-qemu/) | [Design](docs/DESIGN.md) | [Test results](docs/test-results.txt)
 
-Status (v0.2.0): tested in QEMU 6.2 with QNX SDP 8.0 on x86_64, also with two QNX nodes on one virtual CAN bus. In the recorded run at commit c9c7745, 41 of 41 end-to-end tests passed ([docs/test-results.txt](docs/test-results.txt)). Since that run the driver has changed only in comments; `scripts/qemu-can.sh` now also stops the QEMU in the target's pid file, and the host unit tests were added. The suite has not been run again on a target since. It compiles and links for aarch64le. It has not run on ARM or on CTU CAN FD silicon.
+Status (v0.2.0): tested in QEMU 6.2 with QNX SDP 8.0 on x86_64, also with two QNX nodes on one virtual CAN bus. In the recorded run at commit c9c7745, 41 of 41 end-to-end tests passed ([docs/test-results.txt](docs/test-results.txt)). The driver has changed since that run (64-bit timestamps, frame format counters, `-R` and `-E`, a limit on the register dump, and fixes to the TX ring, the fault-injection path and the start and interrupt sequences), and the suite now has 43 tests. On this code the gate test passed in five suite runs on two targets, and 43 of 43 tests passed in four of them ([docs/TESTS.md](docs/TESTS.md)). These runs are not in docs/test-results.txt. It compiles and links for aarch64le. It has not run on ARM or on CTU CAN FD silicon.
 
 The driver is an ordinary QNX process, and `ctucan-supervisor` starts it again when it dies. In `restart_under_load` the driver was killed three times under load and telemetry resumed each time; frames in the dead driver's queues are lost ([docs/TESTS.md](docs/TESTS.md)).
 
@@ -65,7 +65,11 @@ scp build/x86_64/* root@<target>:/tmp/
 # on the host:   candump -x vcan0
 ```
 
-The full test suite (build, gate test and 41 tests) runs with `scripts/test-suite.sh tc vcan0 [tc2]`. It calls `~/bin/qtarget`; if you do not have that helper, run it as `QTARGET=scripts/qtarget-lite.sh scripts/test-suite.sh tc vcan0`, which uses the minimal helper in this repository.
+`scripts/quickstart.sh` runs the same steps in one command after the `apt-get` line and the clone: vcan0, build, the image (first run only), QEMU with the CAN board, then `scripts/gate-test.sh`, which starts the driver and checks frames both ways. It has not yet been run from a fresh clone.
+
+The full test suite (build, gate test and every end-to-end test) runs with `scripts/test-suite.sh tc vcan0 [tc2]`. The scripts reach the target through `scripts/qtarget-lite.sh`; set `QTARGET` to use another helper. `JUNIT=results.xml` also writes the results as JUnit XML.
+
+`scripts/qtarget-lite.sh` finds a target in `~/targets/NAME` and asks `mkqnximage --getip` there for its address, so it needs the SDP environment. If your targets live in another directory, set `TARGETS` to it, for example `TARGETS=~/targets/can scripts/test-suite.sh a vcan0 b`. `scripts/quickstart.sh` uses `TARGETS` too.
 
 ## QNX technologies used
 
@@ -86,7 +90,7 @@ libcan runs every callback on one thread, so the driver state needs no locks. Be
 
 An application that uses libcan's devices and devctls can be run and checked against this driver on a machine with QNX SDP and QEMU, with no CAN board, and the same host can watch and inject frames with `candump` and `cansend`. The repository's demo is a simulated battery-management ECU that sends 64-byte telemetry and answers an OBD-II request.
 
-The test suite is scripted and exits non-zero if the build, the gate test or any test fails, so it can run unattended on such a machine.
+The test suite is scripted and exits non-zero if the build, the gate test or any test fails, so it can run unattended on such a machine. `.github/workflows/qemu-e2e.yml` shows how: a self-hosted Linux runner with QNX SDP, KVM and vcan runs the suite by hand from GitHub and gets one JUnit test case per test. `tools/ecu-sim.c` and `canfd-test tester` are the example application and its tester. The workflow has not run on a registered runner yet.
 
 This is a test fixture path, QEMU only. Production CAN controllers such as FlexCAN and MCAN are out of scope. The driver has not run on ARM or on CTU CAN FD silicon, and QEMU models no bit timing or bus errors, so timing results are QEMU timing.
 
@@ -102,7 +106,7 @@ This is a test fixture path, QEMU only. Production CAN controllers such as FlexC
 | `scripts/` | QEMU launch with the CAN board, host vcan setup, gate test, full test suite |
 | `tests/host/` | Unit tests of the hardware layer and the driver on a fake core and a fake libcan, built with the host compiler; CI runs them |
 | `docs/DESIGN.md` | How it works and what was measured |
-| `docs/TESTS.md`, `docs/test-results.txt` | What the 41 tests cover, the measurements, and the recorded run |
+| `docs/TESTS.md`, `docs/test-results.txt` | What the tests cover, the measurements, and the recorded run |
 | `NOTICE` | Where the register map comes from |
 | `codelab/` | QNX codelab "Test CAN FD software on QNX 8.0 in QEMU, no CAN board needed" and its dry runs |
 
@@ -145,6 +149,7 @@ The driver links statically against `libcan.a` and needs `-lpci -lsecpol -lslog2
 
 1. Build a QNX 8.0 x86_64 QEMU image with `mkqnximage`, with ssh access as root, and keep its output next to the target directory, for example `mkdir -p ~/targets/tc && cd ~/targets/tc && mkqnximage --type=qemu --arch=x86_64 --ssh-ident=$HOME/.ssh/id_ed25519.pub --noprompt --run=-h > ~/targets/tc.log`.
 2. Start it with the CAN board: `scripts/qemu-can.sh ~/targets/tc vcan0`. The script stops any QEMU of that target that still runs (the one `mkqnximage --run` started may still be starting, so `mkqnximage --stop` can miss it), reuses the exact QEMU command line mkqnximage logged in `~/targets/tc.log` and adds the three options above, a monitor socket and `-daemonize`.
+   The script returns as soon as QEMU runs in the background, before QNX has booted. Wait for ssh before the next step, for example `until scripts/qtarget-lite.sh tc ssh true; do sleep 2; done` (`scripts/quickstart.sh` waits the same way).
 3. Copy the binaries to the target (`scp build/x86_64/* root@<target>:/tmp/`) and start the driver as root:
 
 ```
@@ -167,6 +172,7 @@ Options (`dev-can-ctucanfd -h`):
 | `-b rate`, `-d rate`, `-k hz` | nominal bit rate (500000), data bit rate (2000000), core clock (100 MHz) |
 | `-C`, `-A`, `-S` | classic CAN only; every frame as CAN FD; no bit rate switch |
 | `-l`, `-L`, `-a` | internal loopback, listen only, automatic bus-off recovery |
+| `-R n`, `-E` | at most n retransmissions per frame, 0 to 15 (no limit); no bus error interrupt (on). On a bus that may have no other node to acknowledge, use both: otherwise one frame is retransmitted for ever and each attempt is an interrupt. Not tested on silicon; QEMU does not model retransmission |
 
 ## Use
 
@@ -179,6 +185,8 @@ Frames over 8 bytes go out as CAN FD with bit rate switch, lengths rounded up to
 /tmp/canfd-test recv /dev/can1/rx0 2
 /tmp/canfd-test info /dev/can1/rx0                   # libcan statistics and error registers
 /tmp/canfd-test xstats /dev/can1/rx0                 # driver statistics
+/tmp/canfd-test time /dev/can1/rx0                   # 64-bit and 32-bit timestamps
+/tmp/canfd-test fdstats /dev/can1/rx0                # frames by format: classic, CAN FD, BRS, ESI
 /tmp/canctl -u1,tx1 -i                               # the stock QNX canctl works too
 
 # host
@@ -186,7 +194,7 @@ candump -x vcan0
 cansend vcan0 456##1C0C1C2C3                         # CAN FD frame with BRS to QNX
 ```
 
-Driver-specific devctls are in `src/ctucanfd_devctl.h`: extended statistics, manual bus-off recovery (when `-a` is not given) and fault injection.
+Driver-specific devctls are in `src/ctucanfd_devctl.h`: extended statistics, frame counts by format, a 64-bit timestamp, manual bus-off recovery (when `-a` is not given) and fault injection.
 
 Supervision and the ECU demo:
 
@@ -219,15 +227,18 @@ What the tests cover, with the numbers: [docs/TESTS.md](docs/TESTS.md). They che
 
 ## Limitations
 
-- Per-frame FDF, BRS and ESI flags are not reported to clients: libcan's `CAN_MSG` has no field for them, so the frame format is a driver policy (`docs/DESIGN.md`, section 6). To see the flags of frames QNX sends, run `candump -x vcan0` on the host: `B` means bit rate switch.
+- Per-frame FDF, BRS and ESI flags are not reported to clients: libcan's `CAN_MSG` has no field for them, so the frame format is a driver policy (`docs/DESIGN.md`, section 6). The driver counts frames by format both ways (`canfd-test fdstats`, `CTUCAN_DEVCTL_GET_FDSTATS`). To see the flags of single frames QNX sends, run `candump -x vcan0` on the host: `B` means bit rate switch.
 - QEMU 6.2 has no bit timing, error counters, fault confinement or bus timing. Bit timing is computed and written for silicon and ignored by QEMU.
 - The error and bus-off paths are tested through the fault injector only.
 - Times measured on the host are QEMU timing on vcan0.
 - One active core per board (the two cores share one interrupt line in QEMU's model).
 - Acceptance filtering is in software only. QEMU 6.2's model has no acceptance filters (it ignores the filter registers and stores every frame), and the driver does not program the core's filters.
+- Frame timestamps and `CAN_DEVCTL_GET_TIMESTAMP` are 32-bit microseconds and wrap every 2^32 us. `CTUCAN_DEVCTL_GET_TIMESTAMP64` gives the same clock as 64 bits, with the same low 32 bits (`canfd-test time`).
 - Devctl latency has no upper bound: a sustained interrupt load at a priority above the clients' can delay them.
 - Two nodes are two QEMU virtual machines joined by the host's vcan; no physical CAN bus was used.
 - The aarch64le build compiles and links and has not run.
+- `-R`, `-E`, the INT_ENA read-back before each unmask and the order of the two MODE writes at start-up were checked only as register values, and not as bus behaviour (`docs/DESIGN.md`, sections 2.3, 3.3 and 8).
+- Any client that can open a mailbox can send the controller-wide devctls, whatever its open mode, and libcan does not tell the driver who the caller is (`docs/DESIGN.md`, section 7.1).
 
 ## Codelab
 

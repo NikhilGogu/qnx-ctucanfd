@@ -1,0 +1,5 @@
+# Labels of the self-hosted runner that .github/workflows/qemu-e2e.yml needs.
+self-hosted-runner:
+  labels:
+    - qnx-sdp
+    - kvm

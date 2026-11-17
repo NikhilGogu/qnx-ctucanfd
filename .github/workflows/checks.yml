@@ -1,7 +1,7 @@
 # Static checks and host unit tests that run on a hosted Ubuntu runner
 # without QNX.
 #
-# The driver build and the 41 end-to-end tests need a QNX SDP 8.0 and QEMU
+# The driver build and the end-to-end tests need a QNX SDP 8.0 and QEMU
 # with the ctucan_pci board. They are not run on hosted runners. The results
 # of the last full run are in docs/test-results.txt.
 name: checks
@@ -23,7 +23,11 @@ jobs:
       - name: Python syntax
         run: |
           export PYTHONPYCACHEPREFIX="$RUNNER_TEMP/pycache"
-          python3 -m py_compile scripts/tests/ctutest.py codelab/dryrun/gen_pass.py
+          python3 -m py_compile scripts/tests/*.py codelab/dryrun/gen_pass.py
+
+      # The JUnit writer and the test list of ctutest.py; no target needed.
+      - name: Python unit tests
+        run: python3 -m unittest discover -s scripts/tests -p 'test_*.py' -v
 
       - name: Shell syntax
         run: |

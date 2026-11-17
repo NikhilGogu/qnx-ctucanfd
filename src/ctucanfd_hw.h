@@ -34,6 +34,8 @@ typedef struct {
     bool non_iso;               /* SETTINGS.NISOFD */
     bool loopback;              /* SETTINGS.ILBP */
     bool listen_only;           /* MODE.BMM */
+    bool retr_limit;            /* SETTINGS.RTRLE */
+    uint8_t retr_max;           /* SETTINGS.RTRTH, 0..15, used with retr_limit */
     ctucan_bt_t nominal;
     ctucan_bt_t data;
 } ctucan_hw_cfg_t;
@@ -88,6 +90,11 @@ unsigned ctucan_hw_rx_frames(const ctucan_hw_t *hw);
 int      ctucan_hw_rx(const ctucan_hw_t *hw, CAN_MSG *msg, ctucan_flags_t *fl);
 void     ctucan_hw_rx_flush(const ctucan_hw_t *hw);
 
+/* Frame format the driver picks for a frame of `len` bytes (docs/DESIGN.md, section 6):
+ * CAN FD when the core is in FD mode and the frame needs it or -A asks for it,
+ * BRS on CAN FD frames unless -S turned it off. */
+ctucan_flags_t ctucan_tx_flags(bool fd_mode, bool fd_always, bool brs, unsigned len);
+
 unsigned ctucan_len2dlc(unsigned len);
 unsigned ctucan_dlc2len(unsigned dlc, bool fdf);
 int      ctucan_bt_calc(uint32_t clk_hz, uint32_t bitrate, unsigned sp_permille, bool data_phase,
@@ -113,6 +120,7 @@ struct ctucan_fi *ctucan_fi_create(void);
 int      ctucan_fi_start(struct ctucan_fi *fi, unsigned scenario, unsigned arg, unsigned arg2, uint64_t now_ms);
 bool     ctucan_fi_tick(struct ctucan_fi *fi, uint64_t now_ms);
 unsigned ctucan_fi_state(const struct ctucan_fi *fi);
+uint32_t ctucan_fi_pending(const struct ctucan_fi *fi);   /* injected INT_STAT bits not yet acknowledged */
 #endif
 
 #endif
