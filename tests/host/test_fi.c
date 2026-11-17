@@ -29,6 +29,15 @@ static void tick(void)
     CHECK_EQ(dc(RX0, CTUCAN_DEVCTL_FI_TICK, NULL, 0, 0), 0);
 }
 
+/* Ticks that ran the pulse path (CTUCAN_DEVCTL_FI_PULSES). */
+static unsigned fi_pulses(void)
+{
+    uint32_t n = 0;
+
+    CHECK_EQ(dc(RX0, CTUCAN_DEVCTL_FI_PULSES, &n, 0, sizeof(n)), (int)sizeof(n));
+    return n;
+}
+
 /* The core's interrupt output was turned off and on again `n` times. */
 static unsigned toggles(void)
 {
@@ -51,9 +60,9 @@ static void body_warn(void)
     ctucan_xstats_t x = xstats();
     CHECK_EQ(x.ewl_up, 1);
     CHECK_EQ(x.ewl_down, 1);
-    CHECK(x.fi_pulses >= 2, "fi_pulses %u", x.fi_pulses);
-    CHECK(stats().total_interrupts >= x.fi_pulses, "service() ran: total_interrupts %u", stats().total_interrupts);
-    CHECK_EQ(toggles() - t0, x.fi_pulses);   /* finish_pulse() re-armed the output each time */
+    CHECK(fi_pulses() >= 2, "fi_pulses %u", fi_pulses());
+    CHECK(stats().total_interrupts >= fi_pulses(), "service() ran: total_interrupts %u", stats().total_interrupts);
+    CHECK_EQ(toggles() - t0, fi_pulses());   /* finish_pulse() re-armed the output each time */
     CHECK_EQ(fake.int_ena, ENA);
     CHECK_EQ(x.hw_pulses, 0);
     CHECK_EQ(lc.unmasks, 0);                /* nothing was masked for a tick */
@@ -61,11 +70,11 @@ static void body_warn(void)
     CHECK_EQ(stats().error_warning_state_count, 1);
 
     /* idle ticks find nothing injected and service nothing */
-    unsigned n = x.fi_pulses;
+    unsigned n = fi_pulses();
     for (int i = 0; i < 5; i++) {
         tick();
     }
-    CHECK_EQ(xstats().fi_pulses, n);
+    CHECK_EQ(fi_pulses(), n);
     CHECK_EQ(xstats().spurious, 0);
 }
 
@@ -83,7 +92,7 @@ static void body_busoff_now(void)
     CHECK(busoff_hold(), "hold set");
     CHECK_EQ(x.state & 0xffu, 0);
     CHECK_EQ(x.tx_aborted, 2);
-    CHECK_EQ(x.fi_pulses, 1);
+    CHECK_EQ(fi_pulses(), 1);
     CHECK_EQ(stats().bus_off_state_count, 1);
     CHECK(stats().total_interrupts >= 1, "service() ran");
     CHECK_EQ(fake.int_ena, ENA);
@@ -109,7 +118,7 @@ static void body_txdelay(void)
     ctucan_xstats_t x = xstats();
     CHECK_EQ(x.tx_ok, 4);
     CHECK_EQ(x.tx_order_err, 0);
-    CHECK(x.fi_pulses >= 1, "fi_pulses %u", x.fi_pulses);
+    CHECK(fi_pulses() >= 1, "fi_pulses %u", fi_pulses());
     CHECK(stats().tx_interrupts >= 1, "TXBHCI went through service()");
     CHECK_EQ(x.state & 0xffu, 0);
     CHECK_EQ(lc.unmasks, 0);
@@ -124,7 +133,7 @@ static void body_budget_with_error(void)
     /* one RX frame per batch; the warning is injected by the request */
     CHECK_EQ(fi_start(CTUCAN_FI_WARN, 0, 0, 1), 0);
     ctucan_xstats_t x = xstats();
-    CHECK_EQ(x.fi_pulses, 1);
+    CHECK_EQ(fi_pulses(), 1);
     CHECK_EQ(x.ewl_up, 1);
     CHECK_EQ(stats().received_frames, 1);   /* the RX budget holds next to error work */
     CHECK_EQ(x.rx_max_batch, 1);

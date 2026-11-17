@@ -318,12 +318,14 @@ static int do_info(int fd)
 static int do_xstats(int fd)
 {
     ctucan_xstats_t x;
+    uint32_t fi_pulses = 0;     /* stays 0 on a normal build, which refuses the devctl */
     int rc = devctl(fd, CTUCAN_DEVCTL_GET_XSTATS, &x, sizeof(x), NULL);
 
     if (rc != EOK) {
         fprintf(stderr, "CTUCAN_DEVCTL_GET_XSTATS: %s\n", strerror(rc));
         return rc;
     }
+    (void)devctl(fd, CTUCAN_DEVCTL_FI_PULSES, &fi_pulses, sizeof(fi_pulses), NULL);
     printf("xstats: hw_pulses %u deferred %u unmask_err %u rearm_pending %u spurious %u stopped_pulses %u "
            "reports %u notify_deferred %u notify_stuck %u rx_discarded %u rx_max_batch %u rx_flushes %u "
            "rx_flushed %u\n",
@@ -332,7 +334,7 @@ static int do_xstats(int fd)
     printf("xstats: tx_started %u tx_ok %u tx_failed %u tx_aborted %u tx_lost %u tx_order_err %u "
            "tx_max_inflight %u tx_batches %u tx_abort_forced %u fi_pulses %u\n",
            x.tx_started, x.tx_ok, x.tx_failed, x.tx_aborted, x.tx_lost, x.tx_order_err, x.tx_max_inflight,
-           x.tx_batches, x.tx_abort_forced, x.fi_pulses);
+           x.tx_batches, x.tx_abort_forced, fi_pulses);
     printf("xstats: ewl_up %u ewl_down %u busoff_recovered %u restarts %u restart_fail %u fault_state 0x%x "
            "busoff_hold %u ewl %u inflight %u fi_scenario %u fi_step %u\n",
            x.ewl_up, x.ewl_down, x.busoff_recovered, x.restarts, x.restart_fail, (x.state >> 16) & 7u,

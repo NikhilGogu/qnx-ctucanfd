@@ -46,7 +46,6 @@ typedef struct {
     uint32_t restarts;          /* controller restarts (SET_TIMING) that completed */
     uint32_t restart_fail;      /* restarts that failed because the core did not come out of reset */
     uint32_t tx_abort_forced;   /* buffers given up because they did not finish or abort in time */
-    uint32_t fi_pulses;         /* FI builds: ticks that found injected status and ran the pulse path */
     uint32_t state;             /* [31:28] FI scenario, [27:24] FI step, [18:16] FAULT_STATE,
                                  * bit 9 bus-off hold, bit 8 STATUS.EWL, [7:0] frames in flight */
 } ctucan_xstats_t;
@@ -68,5 +67,8 @@ typedef struct {
 /* fault-injection builds only; the normal build answers them like any unknown command */
 #define CTUCAN_DEVCTL_FI         (__DIOT(_DCMD_MISC, CTUCAN_DCMD_CODE + 2, ctucan_fi_req_t))
 #define CTUCAN_DEVCTL_FI_TICK    (__DION(_DCMD_MISC, CTUCAN_DCMD_CODE + 3))
+/* ticks that found injected status and ran the pulse path; outside the
+ * xstats reply, which already fills CAN_DCMD_DATA on QNX 8.0 */
+#define CTUCAN_DEVCTL_FI_PULSES  (__DIOF(_DCMD_MISC, CTUCAN_DCMD_CODE + 7, uint32_t))
 
 #endif

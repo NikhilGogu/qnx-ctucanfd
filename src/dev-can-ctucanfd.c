@@ -117,6 +117,7 @@ struct drv {
 
 #ifdef CTUCAN_FI
     bool fi_fixedprio, fi_nowake;
+    uint32_t fi_pulses;             /* CTUCAN_DEVCTL_FI_PULSES */
 #endif
 };
 
@@ -736,7 +737,7 @@ static void fi_devctl_tick(drv_t *d)
     if (d->in_event || !d->hw_started || (ctucan_fi_pending(d->hw.fi) & d->int_ena) == 0) {
         return;
     }
-    d->x.fi_pulses++;
+    d->fi_pulses++;
     pulse_begin(d);
     for (unsigned i = 0; i < d->nrx; i++) {
         CANDEV *c = &d->rx[i].cdev;
@@ -981,6 +982,10 @@ static int cb_devctl(CANDEV *cdev, io_devctl_t *msg)
     case CTUCAN_DEVCTL_FI_TICK:
         fi_devctl_tick(d);
         rc = EOK;
+        break;
+    case CTUCAN_DEVCTL_FI_PULSES:
+        memcpy(out, &d->fi_pulses, sizeof(d->fi_pulses));
+        rc = sizeof(d->fi_pulses);
         break;
 #endif
     default:
