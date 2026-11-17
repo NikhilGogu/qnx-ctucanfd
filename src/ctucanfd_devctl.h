@@ -67,5 +67,8 @@ typedef struct {
 /* fault-injection builds only; the normal build answers them like any unknown command */
 #define CTUCAN_DEVCTL_FI         (__DIOT(_DCMD_MISC, CTUCAN_DCMD_CODE + 2, ctucan_fi_req_t))
 #define CTUCAN_DEVCTL_FI_TICK    (__DION(_DCMD_MISC, CTUCAN_DCMD_CODE + 3))
+/* Microseconds as a 64-bit value that does not wrap; its low 32 bits are the
+ * 32-bit timestamp of frames and CAN_DEVCTL_GET_TIMESTAMP (src/ctucanfd_time.h) */
+#define CTUCAN_DEVCTL_GET_TIMESTAMP64 (__DIOF(_DCMD_MISC, CTUCAN_DCMD_CODE + 4, uint64_t))
 
 #endif

@@ -65,7 +65,7 @@ scp build/x86_64/* root@<target>:/tmp/
 # on the host:   candump -x vcan0
 ```
 
-The full test suite (build, gate test and 41 tests) runs with `scripts/test-suite.sh tc vcan0 [tc2]`. It calls `~/bin/qtarget`; if you do not have that helper, run it as `QTARGET=scripts/qtarget-lite.sh scripts/test-suite.sh tc vcan0`, which uses the minimal helper in this repository.
+The full test suite (build, gate test and every end-to-end test) runs with `scripts/test-suite.sh tc vcan0 [tc2]`. It calls `~/bin/qtarget`; if you do not have that helper, run it as `QTARGET=scripts/qtarget-lite.sh scripts/test-suite.sh tc vcan0`, which uses the minimal helper in this repository.
 
 ## QNX technologies used
 
@@ -102,7 +102,7 @@ This is a test fixture path, QEMU only. Production CAN controllers such as FlexC
 | `scripts/` | QEMU launch with the CAN board, host vcan setup, gate test, full test suite |
 | `tests/host/` | Unit tests of the hardware layer and the driver on a fake core and a fake libcan, built with the host compiler; CI runs them |
 | `docs/DESIGN.md` | How it works and what was measured |
-| `docs/TESTS.md`, `docs/test-results.txt` | What the 41 tests cover, the measurements, and the recorded run |
+| `docs/TESTS.md`, `docs/test-results.txt` | What the tests cover, the measurements, and the recorded run |
 | `NOTICE` | Where the register map comes from |
 | `codelab/` | QNX codelab "Test CAN FD software on QNX 8.0 in QEMU, no CAN board needed" and its dry runs |
 
@@ -179,6 +179,7 @@ Frames over 8 bytes go out as CAN FD with bit rate switch, lengths rounded up to
 /tmp/canfd-test recv /dev/can1/rx0 2
 /tmp/canfd-test info /dev/can1/rx0                   # libcan statistics and error registers
 /tmp/canfd-test xstats /dev/can1/rx0                 # driver statistics
+/tmp/canfd-test time /dev/can1/rx0                   # 64-bit and 32-bit timestamps
 /tmp/canctl -u1,tx1 -i                               # the stock QNX canctl works too
 
 # host
@@ -186,7 +187,7 @@ candump -x vcan0
 cansend vcan0 456##1C0C1C2C3                         # CAN FD frame with BRS to QNX
 ```
 
-Driver-specific devctls are in `src/ctucanfd_devctl.h`: extended statistics, manual bus-off recovery (when `-a` is not given) and fault injection.
+Driver-specific devctls are in `src/ctucanfd_devctl.h`: extended statistics, a 64-bit timestamp, manual bus-off recovery (when `-a` is not given) and fault injection.
 
 Supervision and the ECU demo:
 
@@ -225,6 +226,7 @@ What the tests cover, with the numbers: [docs/TESTS.md](docs/TESTS.md). They che
 - Times measured on the host are QEMU timing on vcan0.
 - One active core per board (the two cores share one interrupt line in QEMU's model).
 - Acceptance filtering is in software only. QEMU 6.2's model has no acceptance filters (it ignores the filter registers and stores every frame), and the driver does not program the core's filters.
+- Frame timestamps and `CAN_DEVCTL_GET_TIMESTAMP` are 32-bit microseconds and wrap every 2^32 us. `CTUCAN_DEVCTL_GET_TIMESTAMP64` gives the same clock as 64 bits, with the same low 32 bits (`canfd-test time`).
 - Devctl latency has no upper bound: a sustained interrupt load at a priority above the clients' can delay them.
 - Two nodes are two QEMU virtual machines joined by the host's vcan; no physical CAN bus was used.
 - The aarch64le build compiles and links and has not run.

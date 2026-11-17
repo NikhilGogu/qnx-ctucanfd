@@ -11,6 +11,7 @@
  *   canfd-test seqsend DEV ID LEN COUNT GAP_US   sequenced frames (see below)
  *   canfd-test seqrecv DEV COUNT TIMEOUT_MS      check sequenced frames from the host
  *   canfd-test info DEV | xstats DEV | recover DEV
+ *   canfd-test time DEV [SET]              32-bit and 64-bit timestamps; SET sets the 32-bit one first
  *   canfd-test timing DEV BRP TS1 TS2 SJW
  *   canfd-test fi DEV SCENARIO [ARG ARG2 BUDGET FLAGS]   fault injection builds only
  *   canfd-test fitick DEV MS               drive a fault-injection script for MS ms
@@ -340,6 +341,32 @@ static int do_xstats(int fd)
     return EOK;
 }
 
+/* Reads the 64-bit timestamp, then the 32-bit one, so the second is the later. */
+static int do_time(int fd, int argc, char *argv[])
+{
+    uint32_t t32;
+    uint64_t t64;
+    int rc;
+
+    if (argc > 3) {
+        t32 = (uint32_t)strtoul(argv[3], NULL, 0);
+        if ((rc = devctl(fd, CAN_DEVCTL_SET_TIMESTAMP, &t32, sizeof(t32), NULL)) != EOK) {
+            fprintf(stderr, "CAN_DEVCTL_SET_TIMESTAMP: %s\n", strerror(rc));
+            return rc;
+        }
+    }
+    if ((rc = devctl(fd, CTUCAN_DEVCTL_GET_TIMESTAMP64, &t64, sizeof(t64), NULL)) != EOK) {
+        fprintf(stderr, "CTUCAN_DEVCTL_GET_TIMESTAMP64: %s\n", strerror(rc));
+        return rc;
+    }
+    if ((rc = devctl(fd, CAN_DEVCTL_GET_TIMESTAMP, &t32, sizeof(t32), NULL)) != EOK) {
+        fprintf(stderr, "CAN_DEVCTL_GET_TIMESTAMP: %s\n", strerror(rc));
+        return rc;
+    }
+    printf("time: ts64 %llu ts32 %u\n", (unsigned long long)t64, t32);
+    return EOK;
+}
+
 /* Fault-injection builds: one CTUCAN_DEVCTL_FI_TICK per millisecond for MS ms. */
 static int do_fitick(int fd, unsigned ms)
 {
@@ -609,7 +636,7 @@ static int do_tester(int rfd, int argc, char *argv[])
 int main(int argc, char *argv[])
 {
     if (argc < 3) {
-        fprintf(stderr, "usage: canfd-test send|write|recv|seqsend|seqrecv|info|xstats|recover|timing|fi|pulse|tester DEV ...\n");
+        fprintf(stderr, "usage: canfd-test send|write|recv|seqsend|seqrecv|info|xstats|time|recover|timing|fi|pulse|tester DEV ...\n");
         return 1;
     }
     int fd = open(argv[2], O_RDWR);
@@ -633,6 +660,8 @@ int main(int argc, char *argv[])
         rc = do_info(fd);
     } else if (strcmp(cmd, "xstats") == 0) {
         rc = do_xstats(fd);
+    } else if (strcmp(cmd, "time") == 0) {
+        rc = do_time(fd, argc, argv);
     } else if (strcmp(cmd, "recover") == 0) {
         rc = devctl(fd, CTUCAN_DEVCTL_RECOVER, NULL, 0, NULL);
         printf("CTUCAN_DEVCTL_RECOVER: %s\n", strerror(rc));

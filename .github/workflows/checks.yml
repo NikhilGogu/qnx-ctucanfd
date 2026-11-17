@@ -1,7 +1,7 @@
 # Static checks and host unit tests that run on a hosted Ubuntu runner
 # without QNX.
 #
-# The driver build and the 41 end-to-end tests need a QNX SDP 8.0 and QEMU
+# The driver build and the end-to-end tests need a QNX SDP 8.0 and QEMU
 # with the ctucan_pci board. They are not run on hosted runners. The results
 # of the last full run are in docs/test-results.txt.
 name: checks

@@ -426,6 +426,33 @@ def t_timing(t, bus):
     return "sjw 7 > ph2 refused; brp 4 ts1 43 ts2 6 sjw 4 accepted, 1 restart, TX works after"
 
 
+TIME = re.compile(r"^time: ts64 (\d+) ts32 (\d+)$", re.M)
+
+
+def read_time(t, cmd):
+    """(ts64, ts32) pairs printed by canfd-test time, in order."""
+    out = t.out(cmd)
+    got = [(int(a), int(b)) for a, b in TIME.findall(out)]
+    check(got, f"canfd-test time failed: {out.strip()}")
+    return got
+
+
+def t_timestamp64(t, bus):
+    """32-bit timestamps wrap at 2^32 us; the 64-bit devctl keeps counting and agrees in its low 32 bits."""
+    t.driver(force=True)
+    (a64, a32), (b64, b32) = read_time(t, f"{TEST} time {RX0}; sleep 0.01; {TEST} time {RX0}")
+    check(b64 > a64, f"64-bit timestamp not increasing: {a64} then {b64}")
+    for v64, v32 in ((a64, a32), (b64, b32)):
+        check((v32 - (v64 & 0xFFFFFFFF)) % 2**32 < 1000000, f"ts32 {v32} far from the low bits of ts64 {v64}")
+    # 0xFFFFFF00 is 256 us before the wrap; 20 ms later the 32-bit value has wrapped
+    (c64, c32), (d64, d32) = read_time(t, f"{TEST} time {RX0} 0xFFFFFF00; sleep 0.02; {TEST} time {RX0}")
+    check(c32 >= 0xFFFFFF00 or c32 < 1000000, f"just after the set: ts32 {c32:#x}")
+    check(d32 < 1000000, f"20 ms after the set: ts32 {d32:#x} has not wrapped")
+    check(d64 > c64 and (d64 - c64) >= 10000, f"64-bit timestamp across the wrap: {c64} then {d64}")
+    check((d32 - (d64 & 0xFFFFFFFF)) % 2**32 < 1000000, f"after the wrap: ts32 {d32} vs ts64 {d64}")
+    return "64-bit value increases between reads; the 32-bit value wrapped while the 64-bit one went on"
+
+
 def t_spoofed_irq_pulse(t, bus):
     """A client pulse with the interrupt code is not a mask obligation the driver can meet."""
     t.driver()
@@ -1108,7 +1135,7 @@ def t_fi_rx_corrupt(t, bus):
 
 TESTS = [v for k, v in sorted(globals().items()) if k.startswith("t_")]
 ORDER = ["tx_lengths", "rx_lengths", "rtr", "ids", "write_path", "extended_mailbox", "readers", "writers",
-         "rx_overflow", "bidir", "burst_batches", "tx_order", "devctl_sizes", "timing", "spoofed_irq_pulse",
+         "rx_overflow", "bidir", "burst_batches", "tx_order", "devctl_sizes", "timing", "timestamp64", "spoofed_irq_pulse",
          "fi_rejected_normal", "sigterm", "restart_under_load", "supervisor_readiness", "supervisor_hang",
          "ecu_sim", "two_nodes", "fi_warn",
          "fi_passive", "fi_busoff_auto", "fi_busoff_latch", "fi_busoff_manual", "fi_busoff_stuck_abort",
