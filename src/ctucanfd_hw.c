@@ -67,7 +67,7 @@ int ctucan_hw_reset(const ctucan_hw_t *hw)
 
 void ctucan_hw_start(const ctucan_hw_t *hw, const ctucan_hw_cfg_t *cfg, uint32_t int_ena)
 {
-    uint32_t mode = SET_ENA;
+    uint32_t mode = 0;
 
     ctucan_wr(hw, CTUCAN_INT_ENA_CLR, INT_ALL);
     /* Sources the driver does not service never latch in INT_STAT. */
@@ -90,7 +90,11 @@ void ctucan_hw_start(const ctucan_hw_t *hw, const ctucan_hw_cfg_t *cfg, uint32_t
     if (cfg->non_iso) {
         mode |= SET_NISOFD;
     }
+    /* Mode and settings are written while the core is still off the bus, and
+     * only a second write sets ENA, so the core never joins the bus with a
+     * configuration it has not taken yet. */
     ctucan_wr(hw, CTUCAN_MODE, mode);
+    ctucan_wr(hw, CTUCAN_MODE, mode | SET_ENA);
     ctucan_wr(hw, CTUCAN_INT_ENA_SET, int_ena);
 }
 

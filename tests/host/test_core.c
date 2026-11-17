@@ -88,6 +88,12 @@ static void test_start(void)
     CHECK_EQ(mode & (SET_ENA | MODE_FDE), SET_ENA | MODE_FDE);
     CHECK_EQ(mode & (MODE_BMM | SET_ILBP | SET_NISOFD | MODE_RST), 0);
 
+    /* configured with ENA clear, then enabled with the same bits */
+    unsigned m1 = write_at(CTUCAN_MODE, 0), m2 = write_at(CTUCAN_MODE, m1 + 1);
+    CHECK(m2 < fake.nlog, "MODE written once only");
+    CHECK_EQ(fake.log[m1].val & SET_ENA, 0);
+    CHECK_EQ(fake.log[m2].val, fake.log[m1].val | SET_ENA);
+
     /* options map to their MODE and SETTINGS bits */
     cfg.fd = false;
     cfg.listen_only = true;
