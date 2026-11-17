@@ -12,7 +12,7 @@ QTARGET=scripts/qtarget-lite.sh scripts/test-suite.sh tc vcan0
 
 [Demo video](https://youtu.be/cFywX90Fi-M) | [Codelab: Test CAN FD software on QNX 8.0 in QEMU, no CAN board needed](https://nikhil-qnx-codelabs.pages.dev/qnx-canfd-qemu/) | [Design](docs/DESIGN.md) | [Test results](docs/test-results.txt)
 
-Status (v0.2.0): tested in QEMU 6.2 with QNX SDP 8.0 on x86_64, also with two QNX nodes on one virtual CAN bus. In the recorded run at commit c9c7745, 41 of 41 end-to-end tests passed ([docs/test-results.txt](docs/test-results.txt)). Since that run the TX ring bookkeeping in the driver changed (a fix found by the host unit tests) and fault-injection ticks now go through the interrupt service path, both checked on the host only; `scripts/qemu-can.sh` now also stops the QEMU in the target's pid file, and the host unit tests were added. The suite has not been run again on a target since, and the driver has not been rebuilt with the SDP since that change. It compiles and links for aarch64le. It has not run on ARM or on CTU CAN FD silicon.
+Status (v0.2.0): tested in QEMU 6.2 with QNX SDP 8.0 on x86_64, also with two QNX nodes on one virtual CAN bus. In the recorded run at commit c9c7745, 41 of 41 end-to-end tests passed ([docs/test-results.txt](docs/test-results.txt)). The driver has changed since that run (64-bit timestamps, frame format counters, `-R` and `-E`, a limit on the register dump, and fixes to the TX ring, the fault-injection path and the start and interrupt sequences), and the suite now has 43 tests. On this code the gate test passed in five suite runs on two targets, and 43 of 43 tests passed in four of them ([docs/TESTS.md](docs/TESTS.md)). These runs are not in docs/test-results.txt. It compiles and links for aarch64le. It has not run on ARM or on CTU CAN FD silicon.
 
 The driver is an ordinary QNX process, and `ctucan-supervisor` starts it again when it dies. In `restart_under_load` the driver was killed three times under load and telemetry resumed each time; frames in the dead driver's queues are lost ([docs/TESTS.md](docs/TESTS.md)).
 
@@ -68,6 +68,8 @@ scp build/x86_64/* root@<target>:/tmp/
 `scripts/quickstart.sh` runs the same steps in one command after the `apt-get` line and the clone: vcan0, build, the image (first run only), QEMU with the CAN board, then `scripts/gate-test.sh`, which starts the driver and checks frames both ways. It has not yet been run from a fresh clone.
 
 The full test suite (build, gate test and every end-to-end test) runs with `scripts/test-suite.sh tc vcan0 [tc2]`. The scripts reach the target through `scripts/qtarget-lite.sh`; set `QTARGET` to use another helper. `JUNIT=results.xml` also writes the results as JUnit XML.
+
+`scripts/qtarget-lite.sh` finds a target in `~/targets/NAME` and asks `mkqnximage --getip` there for its address, so it needs the SDP environment. If your targets live in another directory, set `TARGETS` to it, for example `TARGETS=~/targets/can scripts/test-suite.sh a vcan0 b`. `scripts/quickstart.sh` uses `TARGETS` too.
 
 ## QNX technologies used
 
@@ -147,6 +149,7 @@ The driver links statically against `libcan.a` and needs `-lpci -lsecpol -lslog2
 
 1. Build a QNX 8.0 x86_64 QEMU image with `mkqnximage`, with ssh access as root, and keep its output next to the target directory, for example `mkdir -p ~/targets/tc && cd ~/targets/tc && mkqnximage --type=qemu --arch=x86_64 --ssh-ident=$HOME/.ssh/id_ed25519.pub --noprompt --run=-h > ~/targets/tc.log`.
 2. Start it with the CAN board: `scripts/qemu-can.sh ~/targets/tc vcan0`. The script stops any QEMU of that target that still runs (the one `mkqnximage --run` started may still be starting, so `mkqnximage --stop` can miss it), reuses the exact QEMU command line mkqnximage logged in `~/targets/tc.log` and adds the three options above, a monitor socket and `-daemonize`.
+   The script returns as soon as QEMU runs in the background, before QNX has booted. Wait for ssh before the next step, for example `until scripts/qtarget-lite.sh tc ssh true; do sleep 2; done` (`scripts/quickstart.sh` waits the same way).
 3. Copy the binaries to the target (`scp build/x86_64/* root@<target>:/tmp/`) and start the driver as root:
 
 ```
@@ -234,6 +237,8 @@ What the tests cover, with the numbers: [docs/TESTS.md](docs/TESTS.md). They che
 - Devctl latency has no upper bound: a sustained interrupt load at a priority above the clients' can delay them.
 - Two nodes are two QEMU virtual machines joined by the host's vcan; no physical CAN bus was used.
 - The aarch64le build compiles and links and has not run.
+- `-R`, `-E`, the INT_ENA read-back before each unmask and the order of the two MODE writes at start-up were checked only as register values, and not as bus behaviour (`docs/DESIGN.md`, sections 2.3, 3.3 and 8).
+- Any client that can open a mailbox can send the controller-wide devctls, whatever its open mode, and libcan does not tell the driver who the caller is (`docs/DESIGN.md`, section 7.1).
 
 ## Codelab
 
