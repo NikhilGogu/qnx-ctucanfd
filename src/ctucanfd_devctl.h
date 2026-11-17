@@ -83,5 +83,8 @@ typedef struct {
  * 32-bit timestamp of frames and CAN_DEVCTL_GET_TIMESTAMP (src/ctucanfd_time.h) */
 #define CTUCAN_DEVCTL_GET_TIMESTAMP64 (__DIOF(_DCMD_MISC, CTUCAN_DCMD_CODE + 4, uint64_t))
 #define CTUCAN_DEVCTL_GET_FDSTATS (__DIOF(_DCMD_MISC, CTUCAN_DCMD_CODE + 5, ctucan_fdstats_t))
+/* ticks that found injected status and ran the pulse path; outside the
+ * xstats reply, which already fills CAN_DCMD_DATA on QNX 8.0 */
+#define CTUCAN_DEVCTL_FI_PULSES  (__DIOF(_DCMD_MISC, CTUCAN_DCMD_CODE + 7, uint32_t))
 
 #endif
