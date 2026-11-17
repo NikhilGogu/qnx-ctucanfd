@@ -174,6 +174,8 @@ Handled by the driver: `GET/SET_MID`, `GET/SET_MFILTER`, `GET/SET_TIMESTAMP`, `G
 
 Driver-specific devctls (`src/ctucanfd_devctl.h`): `CTUCAN_DEVCTL_GET_XSTATS` (pulses, deferred batches, unmask errors, held reader notifications, RX flushes, TX outcomes, warning and bus-off events, state), `CTUCAN_DEVCTL_GET_TIMESTAMP64` (section 4), `CTUCAN_DEVCTL_GET_FDSTATS` (section 6), `CTUCAN_DEVCTL_RECOVER` (request bus-off recovery without `-a`), and, in fault-injection builds only, `CTUCAN_DEVCTL_FI` (start a scenario), `CTUCAN_DEVCTL_FI_TICK` (advance it) and `CTUCAN_DEVCTL_FI_PULSES` (fault-injection ticks serviced like pulses); the normal build answers these three with ENOTTY. The xstats reply fills `CAN_DCMD_DATA` (112 bytes in QNX 8.0), so a new counter needs its own devctl.
 
+Controller-wide devctls are served on every mailbox, to any client that can open one: `SET_TIMING` restarts the controller, `SET_TIMESTAMP` moves every reader's time base, `CTUCAN_DEVCTL_RECOVER` ends a bus-off held without `-a`, and `DEBUG_INFO` writes 17 slog2 lines. The driver does not check who the caller is; the device permissions are the only guard (section 11). The register dump is limited to one a second, and a call inside that second gets EAGAIN and logs nothing.
+
 The stock `canctl` works against the driver: `canctl -u1,tx1 -i` printed `Message queue size: 64`, `Bitrate: 500000 Baud`, `Bitrate prescaler: 4`, `Sync jump width: 6`, `Time segment 1: 43`, `Time segment 2: 6`. canctl's `-w` takes a raw MID, so a standard id must be shifted left by 18.
 
 ## 8. Errors, bus-off and fault injection
@@ -244,6 +246,7 @@ The codelab (`codelab/qnx-canfd-qemu.md`) walks through the same setup by hand.
 - Two nodes are two QEMU targets joined by the host's vcan; no physical CAN bus was used (section 10b).
 - Per-frame FDF, BRS and ESI are not reported to clients (section 6).
 - A `SET_TIMING` restart discards frames still in the RX FIFO (counted in `rx_flushed`).
+- Any client that can open any mailbox can restart the controller (`SET_TIMING`), move the time base (`SET_TIMESTAMP`) and end a held bus-off (`CTUCAN_DEVCTL_RECOVER`); what libcan tells the driver about the caller is not known yet (section 7).
 - Devctl latency has no upper bound: a sustained interrupt load at a priority above the clients' can delay them (section 3.2).
 
 ## 12. Defects found and fixed

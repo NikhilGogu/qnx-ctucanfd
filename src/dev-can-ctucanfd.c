@@ -42,6 +42,7 @@
 #define REPORT_BUDGET   64u     /* RX mailbox returns to libcan per pulse */
 #define TX_QUIESCE_MS   20u     /* wait for frames in flight, then as long again after an abort */
 #define STUCK_LIMIT     8u      /* pulses in a row a mailbox may be returned without waking anyone */
+#define DUMP_MS         1000u   /* at most one register dump per this many ms */
 
 #define container_of(p, type, member) ((type *)(void *)((char *)(p) - offsetof(type, member)))
 
@@ -111,6 +112,7 @@ struct drv {
     bool     busoff_hold;           /* set at bus-off, cleared only by FAULT_STATE = error active */
 
     uint32_t         ts_offset;     /* timestamps: ctucanfd_time.h */
+    uint64_t         dump_ms;       /* last register dump (DEBUG_INFO), now_ms() */
     CAN_DEVCTL_STATS stats;
     ctucan_xstats_t  x;
     ctucan_fdstats_t fdx;
@@ -965,6 +967,13 @@ static int cb_devctl(CANDEV *cdev, io_devctl_t *msg)
         break;
     case CAN_DEVCTL_DEBUG_INFO:
     case CAN_DEVCTL_DEBUG_INFO2:
+        /* 17 slog2 lines a call: any client of any mailbox could otherwise
+         * push the lines that matter out of the log buffer */
+        if (d->dump_ms != 0 && now_ms() - d->dump_ms < DUMP_MS) {
+            rc = -EAGAIN;
+            break;
+        }
+        d->dump_ms = now_ms();
         dump_regs(d);
         rc = EOK;
         break;
