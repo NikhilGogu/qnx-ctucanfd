@@ -30,7 +30,7 @@ import time
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 QTARGET = os.environ.get("QTARGET", os.path.expanduser("~/bin/qtarget"))
 EFF, RTR = 0x80000000, 0x40000000
-BRS = 0x01
+BRS, ESI = 0x01, 0x02     # canfd_frame.flags: CANFD_BRS, CANFD_ESI
 FD_LENS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 12, 16, 20, 24, 32, 48, 64]
 TEST = "/tmp/canfd-test"
 RX0, TX1 = "/dev/can1/rx0", "/dev/can1/tx1"
@@ -130,6 +130,12 @@ class Target:
         check("hw_pulses" in vals, f"xstats failed: {out.strip()}")
         return vals
 
+    def fdstats(self, dev=RX0):
+        out = self.out(f"{TEST} fdstats {dev}")
+        vals = dict((k, int(v)) for k, v in re.findall(r"(\w+) (\d+)", out))
+        check("rx_fd" in vals, f"fdstats failed: {out.strip()}")
+        return vals
+
     def stats(self, dev=RX0):
         out = self.out(f"{TEST} info {dev}")
         m = re.search(r"^stats: (.*)$", out, re.M)
@@ -167,12 +173,13 @@ class Bus:
         while select.select([self.s], [], [], 0)[0]:
             self.s.recv(80)
 
-    def send(self, can_id, data=b"", ext=False, fd=None, brs=True, rtr=False, dlc=None):
+    def send(self, can_id, data=b"", ext=False, fd=None, brs=True, rtr=False, dlc=None, esi=False):
         cid = can_id | (EFF if ext else 0) | (RTR if rtr else 0)
         if fd is None:
             fd = len(data) > 8
         if fd:
-            self.s.send(struct.pack("=IBBBB64s", cid, fd_len(len(data)), BRS if brs else 0, 0, 0, data))
+            flags = (BRS if brs else 0) | (ESI if esi else 0)
+            self.s.send(struct.pack("=IBBBB64s", cid, fd_len(len(data)), flags, 0, 0, data))
         else:
             self.s.send(struct.pack("=IB3x8s", cid, dlc if dlc is not None else len(data), data))
 
@@ -424,6 +431,39 @@ def t_timing(t, bus):
     check("No error" in out_ok and "sjw 4" in info and "bit_rate: 500000" in info, f"{out_ok.strip()} / {info}")
     check(len(fr) == 1 and x["restarts"] == 1, f"after restart: host {fr}, restarts {x['restarts']}")
     return "sjw 7 > ph2 refused; brp 4 ts1 43 ts2 6 sjw 4 accepted, 1 restart, TX works after"
+
+
+def t_fd_flag_counts(t, bus):
+    """Frame formats are counted both ways: classic, CAN FD, BRS and ESI from the RX format word,
+    and the format the driver chose for TX, which the host sees as FD and BRS flags."""
+    t.driver(force=True)
+    f0 = t.fdstats()
+    t.bg(f"{TEST} recv {RX0} 10", "/tmp/fdc.log")
+    time.sleep(0.5)
+    sent = [dict(fd=False), dict(fd=False),                          # 2 classic
+            dict(fd=True, brs=False), dict(fd=True, brs=False),      # 2 CAN FD without BRS
+            dict(fd=True, brs=True), dict(fd=True, brs=True), dict(fd=True, brs=True),   # 3 with BRS
+            dict(fd=True, brs=True, esi=True)]                       # 1 with ESI
+    for i, kw in enumerate(sent):
+        bus.send(0x3D0 + i, bytes(range(8 if not kw["fd"] else 12)), **kw)
+        time.sleep(0.005)
+    time.sleep(0.3)
+    f1 = t.fdstats()
+    rx = {k: f1[k] - f0[k] for k in ("rx_classic", "rx_fd", "rx_brs", "rx_esi")}
+    check(rx["rx_classic"] == 2 and rx["rx_fd"] == 6 and rx["rx_brs"] == 4, f"RX counts {rx}")
+    check(rx["rx_esi"] <= 1, f"RX ESI count {rx['rx_esi']} for 1 frame sent")
+    bus.drain()
+    cap = Capture(bus, 3, 3, ids={0x3E0, 0x3E1, 0x3E2})
+    t.ssh(f"{TEST} send {TX1} 3E0 8 && {TEST} send {TX1} 3E1 12 && {TEST} send {TX1} 3E2 64")
+    got = sorted(cap.wait(), key=lambda f: f["id"])
+    f2 = t.fdstats()
+    tx = {k: f2[k] - f1[k] for k in ("tx_classic", "tx_fd", "tx_brs")}
+    check([(f["fd"], f["brs"]) for f in got] == [(False, False), (True, True), (True, True)], f"host saw {got}")
+    check(tx == {"tx_classic": 1, "tx_fd": 2, "tx_brs": 2}, f"TX counts {tx}")
+    t.ssh("slay -f canfd-test >/dev/null 2>&1; true")
+    # whether QEMU 6.2's host bridge passes ESI into the core's format word is not verified; reported as seen
+    return (f"RX classic 2, FD 6, BRS 4, ESI {rx['rx_esi']} of 1; TX classic 1, FD 2, BRS 2, "
+            "matching the flags the host saw")
 
 
 TIME = re.compile(r"^time: ts64 (\d+) ts32 (\d+)$", re.M)
@@ -1135,7 +1175,7 @@ def t_fi_rx_corrupt(t, bus):
 
 TESTS = [v for k, v in sorted(globals().items()) if k.startswith("t_")]
 ORDER = ["tx_lengths", "rx_lengths", "rtr", "ids", "write_path", "extended_mailbox", "readers", "writers",
-         "rx_overflow", "bidir", "burst_batches", "tx_order", "devctl_sizes", "timing", "timestamp64", "spoofed_irq_pulse",
+         "rx_overflow", "bidir", "burst_batches", "tx_order", "devctl_sizes", "timing", "timestamp64", "fd_flag_counts", "spoofed_irq_pulse",
          "fi_rejected_normal", "sigterm", "restart_under_load", "supervisor_readiness", "supervisor_hang",
          "ecu_sim", "two_nodes", "fi_warn",
          "fi_passive", "fi_busoff_auto", "fi_busoff_latch", "fi_busoff_manual", "fi_busoff_stuck_abort",

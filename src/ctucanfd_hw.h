@@ -88,6 +88,11 @@ unsigned ctucan_hw_rx_frames(const ctucan_hw_t *hw);
 int      ctucan_hw_rx(const ctucan_hw_t *hw, CAN_MSG *msg, ctucan_flags_t *fl);
 void     ctucan_hw_rx_flush(const ctucan_hw_t *hw);
 
+/* Frame format the driver picks for a frame of `len` bytes (docs/DESIGN.md, section 6):
+ * CAN FD when the core is in FD mode and the frame needs it or -A asks for it,
+ * BRS on CAN FD frames unless -S turned it off. */
+ctucan_flags_t ctucan_tx_flags(bool fd_mode, bool fd_always, bool brs, unsigned len);
+
 unsigned ctucan_len2dlc(unsigned len);
 unsigned ctucan_dlc2len(unsigned dlc, bool fdf);
 int      ctucan_bt_calc(uint32_t clk_hz, uint32_t bitrate, unsigned sp_permille, bool data_phase,

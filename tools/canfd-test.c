@@ -11,6 +11,7 @@
  *   canfd-test seqsend DEV ID LEN COUNT GAP_US   sequenced frames (see below)
  *   canfd-test seqrecv DEV COUNT TIMEOUT_MS      check sequenced frames from the host
  *   canfd-test info DEV | xstats DEV | recover DEV
+ *   canfd-test fdstats DEV                 frames by format: classic, CAN FD, BRS, ESI
  *   canfd-test time DEV [SET]              32-bit and 64-bit timestamps; SET sets the 32-bit one first
  *   canfd-test timing DEV BRP TS1 TS2 SJW
  *   canfd-test fi DEV SCENARIO [ARG ARG2 BUDGET FLAGS]   fault injection builds only
@@ -341,6 +342,20 @@ static int do_xstats(int fd)
     return EOK;
 }
 
+static int do_fdstats(int fd)
+{
+    ctucan_fdstats_t f;
+    int rc = devctl(fd, CTUCAN_DEVCTL_GET_FDSTATS, &f, sizeof(f), NULL);
+
+    if (rc != EOK) {
+        fprintf(stderr, "CTUCAN_DEVCTL_GET_FDSTATS: %s\n", strerror(rc));
+        return rc;
+    }
+    printf("fdstats: rx_classic %u rx_fd %u rx_brs %u rx_esi %u tx_classic %u tx_fd %u tx_brs %u\n",
+           f.rx_classic, f.rx_fd, f.rx_brs, f.rx_esi, f.tx_classic, f.tx_fd, f.tx_brs);
+    return EOK;
+}
+
 /* Reads the 64-bit timestamp, then the 32-bit one, so the second is the later. */
 static int do_time(int fd, int argc, char *argv[])
 {
@@ -636,7 +651,7 @@ static int do_tester(int rfd, int argc, char *argv[])
 int main(int argc, char *argv[])
 {
     if (argc < 3) {
-        fprintf(stderr, "usage: canfd-test send|write|recv|seqsend|seqrecv|info|xstats|time|recover|timing|fi|pulse|tester DEV ...\n");
+        fprintf(stderr, "usage: canfd-test send|write|recv|seqsend|seqrecv|info|xstats|fdstats|time|recover|timing|fi|pulse|tester DEV ...\n");
         return 1;
     }
     int fd = open(argv[2], O_RDWR);
@@ -660,6 +675,8 @@ int main(int argc, char *argv[])
         rc = do_info(fd);
     } else if (strcmp(cmd, "xstats") == 0) {
         rc = do_xstats(fd);
+    } else if (strcmp(cmd, "fdstats") == 0) {
+        rc = do_fdstats(fd);
     } else if (strcmp(cmd, "time") == 0) {
         rc = do_time(fd, argc, argv);
     } else if (strcmp(cmd, "recover") == 0) {
