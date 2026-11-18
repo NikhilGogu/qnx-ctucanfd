@@ -12,8 +12,8 @@ SAN     ?= -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-fram
 
 HW      := $(SRC)/ctucanfd_hw.c fake_core.c
 HDRS    := $(SRC)/ctucanfd_hw.h $(SRC)/ctucanfd_regs.h $(SRC)/ctucanfd_time.h fake_core.h check.h $(wildcard shim/*.h shim/*/*.h)
-DRV     := $(SRC)/dev-can-ctucanfd.c $(SRC)/ctucanfd_devctl.h fake_libcan.c fake_libcan.h
-TESTS   := test_dlc_timing test_frames test_core test_time test_driver test_fi test_supervisor
+DRV     := $(SRC)/dev-can-ctucanfd.c $(SRC)/ctucanfd_devctl.h $(SRC)/ctucanfd_timer.h fake_libcan.c fake_libcan.h
+TESTS   := test_dlc_timing test_frames test_core test_time test_driver test_fi test_txw_orders test_supervisor
 
 all: $(addprefix $(BUILD)/,$(TESTS))
 
@@ -25,6 +25,10 @@ $(BUILD)/%: %.c $(HW) $(HDRS) | $(BUILD)
 
 # includes the driver source; see the comment at the top of test_driver.c
 $(BUILD)/test_driver: test_driver.c $(HW) $(HDRS) $(DRV) driver_harness.h | $(BUILD)
+	$(CC) $(CFLAGS) $(SAN) -o $@ $< $(HW) fake_libcan.c
+
+# every order of TX wait events a few deep; includes the driver like test_driver
+$(BUILD)/test_txw_orders: test_txw_orders.c $(HW) $(HDRS) $(DRV) driver_harness.h | $(BUILD)
 	$(CC) $(CFLAGS) $(SAN) -o $@ $< $(HW) fake_libcan.c
 
 # the fault-injection build: the injector sits between the driver and the fake core

@@ -23,6 +23,16 @@ static void body_start(void)
     CHECK(lc.dev[TX1] != NULL && lc.dev[TX1]->devtype == CANDEV_TYPE_TX, "tx1 numbered after the RX mailboxes");
     CHECK_EQ(fake.int_ena, ena);
     CHECK_EQ(fake.mem[CTUCAN_MODE / 4] & (SET_ENA | MODE_FDE), SET_ENA | MODE_FDE);
+    /* the TX wait timer sends its devctl to the driver's own rx0 */
+    CHECK(lc.timer_up, "TX wait timer created");
+    CHECK(strcmp(lc.timer_path, "/dev/can1/rx0") == 0, "timer path %s", lc.timer_path);
+    CHECK_EQ(lc.timer_dcmd, CTUCAN_DEVCTL_TIMER);
+    CHECK_EQ(lc.timer_at_ms, 0);
+}
+
+static void body_start_unit(void)
+{
+    CHECK(strcmp(lc.timer_path, "/dev/can3/rx0") == 0, "timer path %s", lc.timer_path);
 }
 
 static void test_start_stop(void)
@@ -33,6 +43,9 @@ static void test_start_stop(void)
     CHECK(lc.dev[RX0] == NULL && lc.dev[TX1] == NULL, "devices destroyed");
     CHECK_EQ(fake.int_ena, 0);
     CHECK_EQ(fake.mem[CTUCAN_MODE / 4] & SET_ENA, 0);
+    CHECK(!lc.timer_up, "timer deleted at shutdown");
+    CHECK_EQ(lc.slept_ns, 0);   /* nothing in flight: no wait */
+    CHECK_EQ(run("-u 3", body_start_unit), 0);
 
     /* a bad option stops the driver before it touches anything */
     CHECK_EQ(run("-T 5", body_start), EINVAL);
@@ -179,6 +192,9 @@ static void test_tx_wrap(void)
 }
 
 /* ---- errors ------------------------------------------------------------ */
+
+#define TXW_BIT     (1u << 10)  /* GET_XSTATS state: TX wait on */
+#define RESTART_BIT (1u << 11)  /* GET_XSTATS state: SET_TIMING restart pending */
 
 static void body_busoff(void)
 {
@@ -637,6 +653,11 @@ static void body_devctl(void)
     CHECK(dc(RX0, CTUCAN_DEVCTL_FI, &fi, sizeof(fi), 0) == -1 && errno == ENOTSUP, "FI on a normal build");
     CHECK(dc(RX0, CTUCAN_DEVCTL_FI_TICK, NULL, 0, 0) == -1 && errno == ENOTSUP, "FI_TICK on a normal build");
     CHECK(dc(RX0, __DION(_DCMD_MISC, 99), NULL, 0, 0) == -1 && errno == ENOTSUP, "unknown command");
+    /* the timer's devctl with no TX wait on: accepted, changes nothing */
+    restarts = xstats().restarts;
+    CHECK_EQ(dc(TX1, CTUCAN_DEVCTL_TIMER, NULL, 0, 0), 0);
+    CHECK_EQ(xstats().restarts, restarts);
+    CHECK_EQ(xstats().state & (TXW_BIT | RESTART_BIT), 0);
 }
 
 static void body_devctl_fd_always(void)
@@ -653,6 +674,398 @@ static void test_devctl(void)
     CHECK_EQ(run("-A", body_devctl_fd_always), 0);
 }
 
+
+/* ---- TX wait (docs/DESIGN.md, section 5) --------------------------------- */
+
+/* Every case checks lc.slept_ns: libcan's thread never sleeps, and the waits
+ * end by interrupt pulse, client devctl or the timer's devctl alone. */
+
+static const CAN_DEVCTL_TIMING T250 = { .bit_rate_prescaler = 8, .time_segment_1 = 43, .time_segment_2 = 6,
+                                        .sync_jump_width = 6 };
+
+static unsigned btr_brp(void)
+{
+    return (fake.mem[CTUCAN_BTR / 4] >> BTR_BRP_SHIFT) & 0xffu;
+}
+
+static void write_frames(uint32_t id, unsigned n)
+{
+    for (unsigned i = 0; i < n; i++) {
+        CAN_MSG m = frame(id + i, 8);
+        CHECK_EQ(fake_write(TX1, &m), 0);
+    }
+}
+
+/* Bus-off with aborts that do not finish at once: the wait does not block
+ * the pulse, an interrupt retires what does finish, the timer gives up the
+ * rest. The hold still ends only at error active, and TX resumes only once
+ * the wait is over too. */
+static void body_busoff_wait(void)
+{
+    write_frames(0x300, 2);
+    fake.abort_slow = true;
+    uint64_t t0 = fake_now_ms();
+    set_fault(FS_BOF, 256);
+    fake_pulse();
+    ctucan_xstats_t x = xstats();
+    CHECK(busoff_hold(), "hold set at bus-off");
+    CHECK_EQ(x.state & 0xffu, 2);
+    CHECK_EQ(x.state & TXW_BIT, TXW_BIT);
+    CHECK_EQ(fake.txt[0], TXT_ABTP);
+    CHECK_EQ(fake.txt[1], TXT_ABTP);
+    CHECK_EQ(x.tx_aborted, 0);
+    CHECK_EQ(lc.timer_at_ms, t0 + TX_QUIESCE_MS);
+
+    /* buffer 0's abort completes: its interrupt retires it, the wait goes on */
+    fake.txt[0] = TXT_ABT;
+    irq(INT_TXBHCI);
+    fake_pulse();
+    x = xstats();
+    CHECK_EQ(x.tx_aborted, 1);
+    CHECK_EQ(x.state & 0xffu, 1);
+    CHECK_EQ(x.state & TXW_BIT, TXW_BIT);
+
+    /* error active releases the hold; a frame written now still waits */
+    CAN_MSG m = frame(0x310, 8);
+    CHECK_EQ(fake_write(TX1, &m), 0);
+    set_fault(FS_ERA, 0);
+    fake_pulse();
+    CHECK(!busoff_hold(), "hold released at error active");
+    CHECK_EQ(lc.dev[TX1]->msg_queue->msgcnt, 1);
+
+    /* an early wake-up, from the timer or any client, changes nothing */
+    fake_advance_ms(TX_QUIESCE_MS - 1);
+    CHECK(!fake_timer_fire(), "timer not due 19 ms in");
+    CHECK_EQ(dc(TX1, CTUCAN_DEVCTL_TIMER, NULL, 0, 0), 0);
+    CHECK_EQ(xstats().state & 0xffu, 1);
+
+    /* at the deadline the timer's devctl gives buffer 1 up and TX resumes */
+    CHECK(fake_timer_run(), "timer armed");
+    CHECK_EQ(lc.timer_fired, 1);
+    x = xstats();
+    CHECK_EQ(x.tx_abort_forced, 1);
+    CHECK_EQ(x.tx_aborted, 2);
+    CHECK_EQ(x.state & (TXW_BIT | RESTART_BIT | 0xffu), 1);    /* the queued frame is in flight */
+    CHECK_EQ(lc.timer_at_ms, 0);
+    CHECK_EQ(lc.dev[TX1]->msg_queue->msgcnt, 0);
+    CHECK_EQ(fake.txt[2], TXT_RDY);
+    CHECK_EQ(txt_id(2), 0x310);
+    CHECK_EQ(ercrst_writes(), 0);
+    CHECK_EQ(lc.slept_ns, 0);
+}
+
+/* -a: recovery is requested when the wait for the aborts ends, here by the
+ * interrupt that retires the last of them */
+static void body_busoff_wait_auto(void)
+{
+    write_frames(0x320, 1);
+    fake.abort_slow = true;
+    set_fault(FS_BOF, 256);
+    fake_pulse();
+    CHECK_EQ(ercrst_writes(), 0);
+    CHECK_EQ(xstats().state & TXW_BIT, TXW_BIT);
+    fake.txt[0] = TXT_ABT;
+    irq(INT_TXBHCI);
+    fake_pulse();
+    CHECK_EQ(ercrst_writes(), 1);
+    CHECK_EQ(xstats().state & (TXW_BIT | 0xffu), 0);
+    CHECK_EQ(lc.timer_at_ms, 0);
+    CHECK(busoff_hold(), "hold kept until error active");
+    CHECK_EQ(lc.slept_ns, 0);
+}
+
+/* SET_TIMING with frames in flight: replied at once, restart pending; the
+ * interrupt that retires the last frame ends the wait and restarts. */
+static void body_restart_irq(void)
+{
+    CAN_DEVCTL_TIMING t = T250;
+
+    write_frames(0x400, 2);
+    unsigned restarts = xstats().restarts, brp = btr_brp();
+    CHECK_EQ(dc(RX0, CAN_DEVCTL_SET_TIMING, &t, sizeof(t), 0), 0);
+    ctucan_xstats_t x = xstats();
+    CHECK_EQ(x.restarts, restarts);
+    CHECK_EQ(x.state & (TXW_BIT | RESTART_BIT), TXW_BIT | RESTART_BIT);
+    CHECK_EQ(lc.timer_at_ms, fake_now_ms() + TX_QUIESCE_MS);
+    CHECK_EQ(btr_brp(), brp);
+    CHECK(strstr(lc.last_log, "restart once the TXT buffers are done") != NULL, "%s", lc.last_log);
+
+    /* writes while waiting stay queued */
+    CAN_MSG m = frame(0x410, 8);
+    CHECK_EQ(fake_write(TX1, &m), 0);
+    CHECK_EQ(lc.dev[TX1]->msg_queue->msgcnt, 1);
+    CHECK_EQ(fake.txt[2], TXT_ETY);
+
+    fake.txt[0] = fake.txt[1] = TXT_TOK;
+    irq(INT_TXBHCI);
+    fake_pulse();
+    x = xstats();
+    CHECK_EQ(x.tx_ok, 2);
+    CHECK_EQ(x.tx_aborted, 0);
+    CHECK_EQ(x.restarts, restarts + 1);
+    CHECK_EQ(x.state & (TXW_BIT | RESTART_BIT), 0);
+    CHECK_EQ(lc.timer_at_ms, 0);
+    CHECK_EQ(btr_brp(), 8);
+    CHECK(fake.int_ena != 0, "output on after the restart");
+    /* the queued frame goes out on the restarted core, from buffer 0 */
+    CHECK_EQ(lc.dev[TX1]->msg_queue->msgcnt, 0);
+    CHECK_EQ(fake.txt[0], TXT_RDY);
+    CHECK_EQ(txt_id(0), 0x410);
+    CHECK_EQ(lc.slept_ns, 0);
+}
+
+/* Frames that never finish and aborts that never finish: the first deadline
+ * aborts, the second gives up, both through the timer's devctl. */
+static void body_restart_deadline(void)
+{
+    CAN_DEVCTL_TIMING t = T250;
+
+    write_frames(0x420, 2);
+    fake.abort_slow = true;
+    unsigned restarts = xstats().restarts;
+    unsigned cmds = fake_write_count(CTUCAN_TX_COMMAND);
+    CHECK_EQ(dc(RX0, CAN_DEVCTL_SET_TIMING, &t, sizeof(t), 0), 0);
+    fake_advance_ms(TX_QUIESCE_MS - 1);
+    CHECK(!fake_timer_fire(), "not due");
+    CHECK_EQ(fake_write_count(CTUCAN_TX_COMMAND), cmds);   /* no abort before the deadline */
+
+    CHECK(fake_timer_run(), "armed");
+    CHECK_EQ(fake_last_write(CTUCAN_TX_COMMAND), TXC_TXCA | TXC_TXB_MASK(3u));
+    ctucan_xstats_t x = xstats();
+    CHECK_EQ(x.restarts, restarts);
+    CHECK_EQ(x.state & (TXW_BIT | RESTART_BIT | 0xffu), TXW_BIT | RESTART_BIT | 2);
+    CHECK_EQ(lc.timer_at_ms, fake_now_ms() + TX_QUIESCE_MS);
+
+    CHECK(fake_timer_run(), "armed again");
+    x = xstats();
+    CHECK_EQ(x.tx_abort_forced, 2);
+    CHECK_EQ(x.tx_aborted, 2);
+    CHECK_EQ(x.restarts, restarts + 1);
+    CHECK_EQ(x.state & (TXW_BIT | RESTART_BIT | 0xffu), 0);
+    CHECK_EQ(lc.timer_at_ms, 0);
+    CHECK_EQ(btr_brp(), 8);
+    CHECK_EQ(lc.timer_fired, 2);
+    CHECK_EQ(lc.slept_ns, 0);
+}
+
+/* As on QEMU, the abort finishes at once: the first deadline ends the wait. */
+static void body_restart_abort(void)
+{
+    CAN_DEVCTL_TIMING t = T250;
+
+    write_frames(0x430, 2);
+    unsigned restarts = xstats().restarts;
+    CHECK_EQ(dc(RX0, CAN_DEVCTL_SET_TIMING, &t, sizeof(t), 0), 0);
+    CHECK(fake_timer_run(), "armed");
+    ctucan_xstats_t x = xstats();
+    CHECK_EQ(x.tx_aborted, 2);
+    CHECK_EQ(x.tx_abort_forced, 0);
+    CHECK_EQ(x.restarts, restarts + 1);
+    CHECK_EQ(x.state & (TXW_BIT | RESTART_BIT | 0xffu), 0);
+    CHECK_EQ(lc.slept_ns, 0);
+}
+
+/* The latest timing wins; a deferred reset that fails is counted and logged. */
+static void body_restart_latest(void)
+{
+    CAN_DEVCTL_TIMING t = T250;
+
+    write_frames(0x440, 1);
+    unsigned restarts = xstats().restarts;
+    CHECK_EQ(dc(RX0, CAN_DEVCTL_SET_TIMING, &t, sizeof(t), 0), 0);
+    t.bit_rate_prescaler = 5;
+    CHECK_EQ(dc(RX0, CAN_DEVCTL_SET_TIMING, &t, sizeof(t), 0), 0);
+    CHECK_EQ(xstats().restarts, restarts);
+    fake.txt[0] = TXT_TOK;
+    irq(INT_TXBHCI);
+    fake_pulse();
+    CHECK_EQ(xstats().restarts, restarts + 1);
+    CHECK_EQ(btr_brp(), 5);
+
+    write_frames(0x450, 1);
+    fake.reset_stuck = true;
+    CHECK_EQ(dc(RX0, CAN_DEVCTL_SET_TIMING, &t, sizeof(t), 0), 0);
+    fake.txt[0] = TXT_TOK;
+    irq(INT_TXBHCI);
+    fake_pulse();
+    ctucan_xstats_t x = xstats();
+    CHECK_EQ(x.restart_fail, 1);
+    CHECK_EQ(x.restarts, restarts + 1);
+    CHECK_EQ(x.state & (TXW_BIT | RESTART_BIT), 0);
+    CHECK_EQ(fake.int_ena, 0);
+    CHECK(strstr(lc.last_log, "deferred restart failed") != NULL, "%s", lc.last_log);
+
+    /* with nothing in flight the next one runs at once and its reply tells */
+    fake.reset_stuck = false;
+    CHECK_EQ(dc(RX0, CAN_DEVCTL_SET_TIMING, &t, sizeof(t), 0), 0);
+    CHECK_EQ(xstats().restarts, restarts + 2);
+    CHECK(fake.int_ena != 0, "output on");
+    CHECK_EQ(lc.slept_ns, 0);
+}
+
+/* Shutdown (SIGTERM: the body returns) waits off libcan's loop, bounded. */
+static void body_shutdown_stuck(void)
+{
+    write_frames(0x460, 2);
+    fake.abort_slow = true;
+}
+
+static void body_shutdown_one_done(void)
+{
+    write_frames(0x470, 2);
+    fake.txt[0] = TXT_TOK;  /* sent; its interrupt not handled before SIGTERM */
+}
+
+static void body_shutdown_pending(void)
+{
+    CAN_DEVCTL_TIMING t = T250;
+
+    write_frames(0x480, 1);
+    fake.abort_slow = true;
+    CHECK_EQ(dc(RX0, CAN_DEVCTL_SET_TIMING, &t, sizeof(t), 0), 0);
+    fake_advance_ms(5);
+}
+
+static void test_tx_wait(void)
+{
+    CHECK_EQ(run("", body_busoff_wait), 0);
+    CHECK_EQ(run("-a", body_busoff_wait_auto), 0);
+    CHECK_EQ(run("", body_restart_irq), 0);
+    CHECK_EQ(run("", body_restart_deadline), 0);
+    CHECK_EQ(run("", body_restart_abort), 0);
+    CHECK_EQ(run("", body_restart_latest), 0);
+
+    /* finish phase, abort phase, then given up: two phases of sleep at most */
+    CHECK_EQ(run("", body_shutdown_stuck), 0);
+    CHECK(lc.slept_ns >= 2ull * TX_QUIESCE_MS * 1000000u && lc.slept_ns <= 2ull * TX_QUIESCE_MS * 1000000u + 200000u,
+          "slept %llu ns", (unsigned long long)lc.slept_ns);
+    CHECK_EQ(g_drv.x.tx_abort_forced, 2);
+    CHECK_EQ(g_drv.x.tx_aborted, 2);
+    CHECK(!lc.timer_up && lc.timer_at_ms == 0, "timer gone before the wait");
+    CHECK(strstr(lc.last_log, "stopped: tx") != NULL, "%s", lc.last_log);
+
+    /* one frame went out, the other is aborted after the finish phase */
+    CHECK_EQ(run("", body_shutdown_one_done), 0);
+    CHECK(lc.slept_ns >= 1ull * TX_QUIESCE_MS * 1000000u && lc.slept_ns <= 1ull * TX_QUIESCE_MS * 1000000u + 200000u,
+          "slept %llu ns", (unsigned long long)lc.slept_ns);
+    CHECK_EQ(g_drv.x.tx_ok, 1);
+    CHECK_EQ(g_drv.x.tx_aborted, 1);
+    CHECK_EQ(g_drv.x.tx_abort_forced, 0);
+
+    /* a wait already on keeps its deadline; the pending restart is dropped */
+    CHECK_EQ(run("", body_shutdown_pending), 0);
+    CHECK(lc.slept_ns >= (2ull * TX_QUIESCE_MS - 5) * 1000000u &&
+          lc.slept_ns <= (2ull * TX_QUIESCE_MS - 5) * 1000000u + 200000u, "slept %llu ns",
+          (unsigned long long)lc.slept_ns);
+    CHECK_EQ(g_drv.x.restarts, 0);
+    CHECK_EQ(g_drv.x.tx_abort_forced, 1);
+}
+
+/* ---- time across the 32-bit wrap ----------------------------------------- */
+
+#define W32_US 0x100000000ull
+
+/* Frame timestamps are 32-bit microseconds and wrap every 2^32 us (about
+ * 71.6 minutes). Deadlines and intervals in the driver are 64-bit, so a TX
+ * wait across the wrap ends on time, and the 64-bit timestamp goes on. */
+static void body_wrap(void)
+{
+    CAN_DEVCTL_TIMING t = T250;
+    uint64_t a = 0, b = 0;
+    uint32_t ts = 0;
+
+    lc.now_ns = (W32_US - 2000u) * 1000u;   /* 2 ms before the wrap; offset 0 */
+    uint64_t start_us = lc.now_ns / 1000u;
+    fake_block_readers(RX0, 2);
+    CHECK_EQ(dc(RX0, CTUCAN_DEVCTL_GET_TIMESTAMP64, &a, 0, sizeof(a)), sizeof(a));
+    CHECK_EQ(a, start_us);
+    rx_frame(0x123, 8);
+    fake_pulse();
+    CHECK_EQ(lc.nrx, 1);
+    CHECK_EQ(lc.rx[0].msg.ext.timestamp, (uint32_t)(W32_US - 2000u));
+
+    /* a restart wait whose deadline lies past the wrap */
+    write_frames(0x490, 1);
+    unsigned restarts = xstats().restarts;
+    CHECK_EQ(dc(RX0, CAN_DEVCTL_SET_TIMING, &t, sizeof(t), 0), 0);
+    CHECK_EQ(lc.timer_at_ms, start_us / 1000u + TX_QUIESCE_MS);
+    CHECK(lc.timer_at_ms * 1000u > W32_US, "deadline past the wrap");
+    fake_advance_ms(10);
+    CHECK(lc.now_ns / 1000u > W32_US, "clock past the wrap");
+    CHECK(!fake_timer_fire(), "not due 10 ms in, after the wrap");
+    CHECK_EQ(xstats().state & RESTART_BIT, RESTART_BIT);
+    CHECK(fake_timer_run(), "armed");
+    ctucan_xstats_t x = xstats();
+    CHECK_EQ(x.restarts, restarts + 1);
+    CHECK_EQ(x.tx_aborted, 1);
+    CHECK_EQ(x.state & (TXW_BIT | RESTART_BIT), 0);
+
+    uint64_t elapsed = lc.now_ns / 1000u - start_us;
+    rx_frame(0x124, 8);
+    fake_pulse();
+    CHECK_EQ(lc.nrx, 2);
+    uint32_t ts2 = lc.rx[1].msg.ext.timestamp;
+    CHECK(ts2 < 1000000u, "32-bit timestamp wrapped: %u", ts2);
+    CHECK_EQ((uint32_t)(ts2 - lc.rx[0].msg.ext.timestamp), elapsed);
+    CHECK_EQ(dc(RX0, CTUCAN_DEVCTL_GET_TIMESTAMP64, &b, 0, sizeof(b)), sizeof(b));
+    CHECK_EQ(b - a, elapsed);
+    CHECK(b > W32_US, "64-bit timestamp did not wrap");
+    CHECK_EQ(dc(RX0, CAN_DEVCTL_GET_TIMESTAMP, &ts, 0, sizeof(ts)), sizeof(ts));
+    CHECK_EQ(ts, (uint32_t)b);
+    CHECK_EQ(lc.slept_ns, 0);
+}
+
+/* ---- slow TX diagnostics (docs/TESTS.md, restart_under_load) ------------- */
+
+static void body_slow_tx(void)
+{
+    write_frames(0x500, 4);     /* the ring is full */
+    fake.txt[0] = TXT_TOK;      /* sent at once, as on QEMU; its pulse is late */
+    fake_advance_ms(1);
+    write_frames(0x504, 1);     /* queues, and finds buffer 0 done */
+    fake_advance_ms(3);
+    unsigned lines = lc.slog_lines;
+    irq(INT_TXBHCI);
+    fake_pulse();
+    CHECK_EQ(lc.slog_lines - lines, 1);
+    CHECK(strstr(lc.last_log, "slow TX: frame 0 buf 0 st 4: 4000 us to retire (pulse); pulses since 1, "
+                              "prev gap 0 us; final seen 3000 us before; inflight 4 queued 1; slow 1 unlogged 0") !=
+          NULL, "%s", lc.last_log);
+
+    /* another slow frame within SLOW_LOG_MS: counted, not logged */
+    lines = lc.slog_lines;
+    fake.txt[1] = TXT_TOK;
+    irq(INT_TXBHCI);
+    fake_pulse();
+    CHECK_EQ(lc.slog_lines, lines);
+    CHECK_EQ(g_drv.tx_slow, 2);
+
+    fake_advance_ms(SLOW_LOG_MS);
+    fake.txt[2] = TXT_TOK;
+    irq(INT_TXBHCI);
+    fake_pulse();
+    CHECK_EQ(lc.slog_lines - lines, 1);
+    CHECK(strstr(lc.last_log, "frame 2 buf 2 st 4: 104000 us to retire (pulse); pulses since 3, prev gap 100000 us; "
+                              "final seen 0 us before; inflight 3 queued 0; slow 3 unlogged 1") != NULL, "%s",
+          lc.last_log);
+
+    lines = lc.slog_lines;
+    fake.txt[3] = TXT_TOK;
+    fake.txt[0] = TXT_TOK;  /* frame 4, set ready in the pulse that retired buffer 0 */
+    irq(INT_TXBHCI);
+    fake_pulse();
+    CHECK_EQ(g_drv.tx_slow, 5);     /* frame 3 is slow, frame 4 (in buffer 0 for 100 ms) too */
+    CHECK_EQ(lc.slog_lines, lines); /* within SLOW_LOG_MS of the last line */
+
+    /* a frame retired in time logs nothing and counts nothing */
+    write_frames(0x510, 1);
+    fake_advance_ms(1);
+    fake.txt[1] = TXT_TOK;
+    irq(INT_TXBHCI);
+    fake_pulse();
+    CHECK_EQ(g_drv.tx_slow, 5);
+}
+
 int main(void)
 {
     test_start_stop();
@@ -664,5 +1077,8 @@ int main(void)
     test_reports();
     test_retr_limit();
     test_devctl();
+    test_tx_wait();
+    CHECK_EQ(run("", body_wrap), 0);
+    CHECK_EQ(run("", body_slow_tx), 0);
     return check_exit("test_driver");
 }

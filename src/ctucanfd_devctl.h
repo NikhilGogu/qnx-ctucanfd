@@ -47,6 +47,7 @@ typedef struct {
     uint32_t restart_fail;      /* restarts that failed because the core did not come out of reset */
     uint32_t tx_abort_forced;   /* buffers given up because they did not finish or abort in time */
     uint32_t state;             /* [31:28] FI scenario, [27:24] FI step, [18:16] FAULT_STATE,
+                                 * bit 11 SET_TIMING restart pending, bit 10 TX wait pending,
                                  * bit 9 bus-off hold, bit 8 STATUS.EWL, [7:0] frames in flight */
 } ctucan_xstats_t;
 
@@ -86,5 +87,10 @@ typedef struct {
 /* ticks that found injected status and ran the pulse path; outside the
  * xstats reply, which already fills CAN_DCMD_DATA on QNX 8.0 */
 #define CTUCAN_DEVCTL_FI_PULSES  (__DIOF(_DCMD_MISC, CTUCAN_DCMD_CODE + 7, uint32_t))
+/* Sent by the driver's own wait-timer thread (src/ctucanfd_timer.h) when the
+ * deadline of a TX wait comes; the driver then moves the wait on. Any client
+ * may send it: the driver acts only on a deadline that has passed or on TXT
+ * buffers that are final. */
+#define CTUCAN_DEVCTL_TIMER      (__DION(_DCMD_MISC, CTUCAN_DCMD_CODE + 8))
 
 #endif

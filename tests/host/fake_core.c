@@ -74,6 +74,8 @@ static void rx_flush(void)
 
 static void apply_wr(uint32_t off, uint32_t val);
 
+static uint32_t rd(uint32_t off);
+
 uint32_t ctucan_rd(const ctucan_hw_t *hw, uint32_t off)
 {
     (void)hw;
@@ -82,6 +84,15 @@ uint32_t ctucan_rd(const ctucan_hw_t *hw, uint32_t off)
         apply_wr(posted_q[i].off, posted_q[i].val);
     }
     nposted = 0;
+    uint32_t v = rd(off);
+    if (fake.on_rd != NULL) {
+        fake.on_rd(off, v);
+    }
+    return v;
+}
+
+static uint32_t rd(uint32_t off)
+{
     switch (off) {
     case CTUCAN_DEVICE_ID:
         return fake.device_id;
@@ -130,6 +141,9 @@ void ctucan_wr(const ctucan_hw_t *hw, uint32_t off, uint32_t val)
 
 static void apply_wr(uint32_t off, uint32_t val)
 {
+    if (fake.on_wr != NULL) {
+        fake.on_wr(off, val);
+    }
     switch (off) {
     case CTUCAN_MODE:
         if ((val & MODE_RST) && !fake.reset_stuck) {
@@ -160,7 +174,7 @@ static void apply_wr(uint32_t off, uint32_t val)
             if ((val & TXC_TXCR) && ctucan_txt_writable(fake.txt[b])) {
                 fake.txt[b] = TXT_RDY;
             } else if ((val & TXC_TXCA) && (fake.txt[b] == TXT_RDY || fake.txt[b] == TXT_TRAN)) {
-                fake.txt[b] = TXT_ABT;
+                fake.txt[b] = fake.abort_slow ? TXT_ABTP : TXT_ABT;
             } else if (val & TXC_TXCE) {
                 fake.txt[b] = TXT_ETY;
             }

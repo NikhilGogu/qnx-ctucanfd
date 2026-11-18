@@ -98,6 +98,39 @@ static void body_busoff_now(void)
     CHECK_EQ(fake.int_ena, ENA);
 }
 
+/* Bus-off with aborts that take 100 ms (arg2 bit 0) and nothing else
+ * happening: the request returns at once with the TX wait on, nothing sleeps
+ * on libcan's thread, and the driver's wait timer gives the aborts up at
+ * 20 ms, before the injector would have finished them. */
+static void body_busoff_slow_abort(void)
+{
+    /* as fi_busoff_abort_notick on a target: completions held for 5 s first */
+    CHECK_EQ(fi_start(CTUCAN_FI_TXDELAY, 5000, 2, 0), 0);
+    for (unsigned i = 0; i < 2; i++) {
+        CAN_MSG m = frame(0x2e9 + i, 8);
+        CHECK_EQ(fake_write(TX1, &m), 0);
+    }
+    uint64_t t0 = fake_now_ms();
+    CHECK_EQ(fi_start(CTUCAN_FI_BUSOFF, 2, 1, 0), 0);
+    ctucan_xstats_t x = xstats();
+    CHECK(busoff_hold(), "hold set");
+    CHECK((x.state >> 10) & 1u, "TX wait on");
+    CHECK_EQ(x.state & 0xffu, 2);
+    CHECK_EQ(x.tx_abort_forced, 0);
+    CHECK_EQ(lc.timer_at_ms, t0 + 20);
+
+    CHECK(fake_timer_run(), "timer fired");
+    x = xstats();
+    CHECK_EQ(fake_now_ms(), t0 + 20);
+    CHECK_EQ(x.state & 0xffu, 0);
+    CHECK_EQ((x.state >> 10) & 1u, 0);
+    CHECK_EQ(x.tx_abort_forced, 2);
+    CHECK_EQ(x.tx_aborted, 2);
+    CHECK(busoff_hold(), "hold kept until error active");
+    CHECK_EQ(lc.timer_at_ms, 0);
+    CHECK_EQ(lc.slept_ns, 0);
+}
+
 static void body_txdelay(void)
 {
     CHECK_EQ(fi_start(CTUCAN_FI_TXDELAY, 5, 4, 0), 0);
@@ -155,6 +188,7 @@ int main(void)
 {
     CHECK_EQ(run("", body_warn), 0);
     CHECK_EQ(run("", body_busoff_now), 0);
+    CHECK_EQ(run("", body_busoff_slow_abort), 0);
     CHECK_EQ(run("", body_txdelay), 0);
     CHECK_EQ(run("-q 128", body_budget_with_error), 0);
     return check_exit("test_fi");

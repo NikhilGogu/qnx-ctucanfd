@@ -158,7 +158,7 @@ dev-can-ctucanfd: B0:D5:F0 BAR1 0xfeb90000 core 0 of 2, irq 10
 dev-can-ctucanfd: CTU CAN FD 2.2, /dev/can1/rx0..rx0 tx1..tx1, CAN FD, 500000 bit/s (brp 4 tq 50), data 2000000 bit/s (brp 1 tq 50) BRS, 4 TXT buffer(s)
 ```
 
-The driver detaches from the shell once it runs and lets go of the terminal, so `ssh root@<target> /tmp/dev-can-ctucanfd` returns; from then on it logs to slog2. `slay dev-can-ctucanfd` (SIGTERM) stops it cleanly.
+The driver detaches from the shell once it runs and lets go of the terminal, so `ssh root@<target> /tmp/dev-can-ctucanfd` returns; from then on it logs to slog2. `slay dev-can-ctucanfd` (SIGTERM) stops it cleanly, together with its TX wait timer helper, a second process of the same name.
 
 Options (`dev-can-ctucanfd -h`):
 
@@ -194,7 +194,7 @@ candump -x vcan0
 cansend vcan0 456##1C0C1C2C3                         # CAN FD frame with BRS to QNX
 ```
 
-Driver-specific devctls are in `src/ctucanfd_devctl.h`: extended statistics, frame counts by format, a 64-bit timestamp, manual bus-off recovery (when `-a` is not given) and fault injection.
+Driver-specific devctls are in `src/ctucanfd_devctl.h`: extended statistics, frame counts by format, a 64-bit timestamp, manual bus-off recovery (when `-a` is not given), fault injection, and `CTUCAN_DEVCTL_TIMER`, which only the driver's own wait-timer thread sends (`docs/DESIGN.md`, section 5).
 
 Supervision and the ECU demo:
 
@@ -233,8 +233,10 @@ What the tests cover, with the numbers: [docs/TESTS.md](docs/TESTS.md). They che
 - Times measured on the host are QEMU timing on vcan0.
 - One active core per board (the two cores share one interrupt line in QEMU's model).
 - Acceptance filtering is in software only. QEMU 6.2's model has no acceptance filters (it ignores the filter registers and stores every frame), and the driver does not program the core's filters.
-- Frame timestamps and `CAN_DEVCTL_GET_TIMESTAMP` are 32-bit microseconds and wrap every 2^32 us. `CTUCAN_DEVCTL_GET_TIMESTAMP64` gives the same clock as 64 bits, with the same low 32 bits (`canfd-test time`).
+- Frame timestamps and `CAN_DEVCTL_GET_TIMESTAMP` are 32-bit microseconds and wrap every 2^32 us, about 71.6 minutes. Subtract two of them as unsigned 32-bit values to get an interval across one wrap; the driver itself computes no interval from them. `CTUCAN_DEVCTL_GET_TIMESTAMP64` gives the same clock as 64 bits, with the same low 32 bits (`canfd-test time`).
 - Devctl latency has no upper bound: a sustained interrupt load at a priority above the clients' can delay them.
+- With frames in the TXT buffers, `CAN_DEVCTL_SET_TIMING` replies EOK before the restart runs: the restart waits for those frames (at most 40 ms) without blocking the driver's thread. Its result shows in `canfd-test xstats` (`restart_pending`, `restart_fail`) and slog2; `canfd-test timing` waits for it and prints it (`docs/DESIGN.md`, section 5).
+- `restart_under_load` sometimes fails on the test host (1 of 5 suite runs, 1 of 12 runs alone) with one telemetry gap over 5 ms outside the kills; the cause is not known yet, and the test now prints diagnostics when it fails (`docs/TESTS.md`).
 - Two nodes are two QEMU virtual machines joined by the host's vcan; no physical CAN bus was used.
 - The aarch64le build compiles and links and has not run.
 - `-R`, `-E`, the INT_ENA read-back before each unmask and the order of the two MODE writes at start-up were checked only as register values, and not as bus behaviour (`docs/DESIGN.md`, sections 2.3, 3.3 and 8).

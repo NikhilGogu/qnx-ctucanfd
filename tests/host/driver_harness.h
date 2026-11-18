@@ -18,6 +18,12 @@
 #include "fake_core.h"
 #include "fake_libcan.h"
 
+/* The driver's clock and sleeps run on the fake's virtual time, and so do
+ * the tests' own (test_fi.c's tick()), so TX wait deadlines are exact. */
+#include <time.h>
+#define clock_gettime fake_clock_gettime
+#define nanosleep fake_nanosleep
+
 #define main drv_main
 #include "dev-can-ctucanfd.c"
 #undef main

@@ -338,10 +338,45 @@ static int do_xstats(int fd)
            x.tx_started, x.tx_ok, x.tx_failed, x.tx_aborted, x.tx_lost, x.tx_order_err, x.tx_max_inflight,
            x.tx_batches, x.tx_abort_forced, fi_pulses);
     printf("xstats: ewl_up %u ewl_down %u busoff_recovered %u restarts %u restart_fail %u fault_state 0x%x "
-           "busoff_hold %u ewl %u inflight %u fi_scenario %u fi_step %u\n",
+           "busoff_hold %u ewl %u inflight %u tx_wait %u restart_pending %u fi_scenario %u fi_step %u\n",
            x.ewl_up, x.ewl_down, x.busoff_recovered, x.restarts, x.restart_fail, (x.state >> 16) & 7u,
-           (x.state >> 9) & 1u, (x.state >> 8) & 1u, x.state & 0xffu, x.state >> 28, (x.state >> 24) & 0xfu);
+           (x.state >> 9) & 1u, (x.state >> 8) & 1u, x.state & 0xffu, (x.state >> 10) & 1u, (x.state >> 11) & 1u,
+           x.state >> 28, (x.state >> 24) & 0xfu);
     return EOK;
+}
+
+/* SET_TIMING. With frames in its TXT buffers the driver replies at once and
+ * restarts once they are done (docs/DESIGN.md, section 5); this waits for
+ * that, up to 2 s, and reports a reset that failed then as the reply would
+ * have. Each GET_XSTATS here also lets the driver's wait move on. */
+static int do_timing(int fd, const CAN_DEVCTL_TIMING *t)
+{
+    ctucan_xstats_t x;
+    uint32_t fails;
+
+    if (devctl(fd, CTUCAN_DEVCTL_GET_XSTATS, &x, sizeof(x), NULL) != EOK) {
+        memset(&x, 0, sizeof(x));
+    }
+    fails = x.restart_fail;
+    int rc = devctl(fd, CAN_DEVCTL_SET_TIMING, (void *)t, sizeof(*t), NULL);
+    printf("CAN_DEVCTL_SET_TIMING: %s\n", strerror(rc));
+    if (rc != EOK || devctl(fd, CTUCAN_DEVCTL_GET_XSTATS, &x, sizeof(x), NULL) != EOK ||
+        !((x.state >> 11) & 1u)) {
+        return rc;
+    }
+    for (int i = 0; i < 400 && ((x.state >> 11) & 1u); i++) {
+        usleep(5000);
+        if (devctl(fd, CTUCAN_DEVCTL_GET_XSTATS, &x, sizeof(x), NULL) != EOK) {
+            break;
+        }
+    }
+    if ((x.state >> 11) & 1u) {
+        printf("restart deferred, still pending after 2 s\n");
+        return ETIMEDOUT;
+    }
+    rc = x.restart_fail != fails ? ETIMEDOUT : EOK;
+    printf("restart deferred until the TXT buffers were done: %s\n", strerror(rc));
+    return rc;
 }
 
 static int do_fdstats(int fd)
@@ -687,8 +722,7 @@ int main(int argc, char *argv[])
     } else if (strcmp(cmd, "timing") == 0 && argc > 6) {
         CAN_DEVCTL_TIMING t = { 0, (uint16_t)strtoul(argv[3], NULL, 0), (uint8_t)strtoul(argv[6], NULL, 0),
                                 (uint8_t)strtoul(argv[4], NULL, 0), (uint8_t)strtoul(argv[5], NULL, 0) };
-        rc = devctl(fd, CAN_DEVCTL_SET_TIMING, &t, sizeof(t), NULL);
-        printf("CAN_DEVCTL_SET_TIMING: %s\n", strerror(rc));
+        rc = do_timing(fd, &t);
     } else if (strcmp(cmd, "fi") == 0 && argc > 3) {
         ctucan_fi_req_t r = { (uint32_t)strtoul(argv[3], NULL, 0),
                               argc > 4 ? (uint32_t)strtoul(argv[4], NULL, 0) : 0,

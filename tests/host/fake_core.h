@@ -37,9 +37,15 @@ typedef struct {
     uint32_t device_id;                     /* what DEVICE_ID reads */
     bool     reset_stuck;                   /* a soft reset never completes */
     bool     posted;                        /* writes land at the next read, as PCI allows */
+    bool     abort_slow;                    /* an abort leaves the buffer "abort in progress" (TXT_ABTP) */
     unsigned rx_reads;                      /* RX_DATA words popped */
     fake_wr_t log[FAKE_LOG_MAX];            /* register writes, in order */
     unsigned nlog;
+    /* Observers for test_txw_orders.c, NULL unless a test sets them (fake_init()
+     * clears them): on_rd sees every value read, on_wr every write before it
+     * takes effect. They watch only; nothing about the core changes. */
+    void   (*on_rd)(uint32_t off, uint32_t val);
+    void   (*on_wr)(uint32_t off, uint32_t val);
 } fake_core_t;
 
 extern fake_core_t fake;
