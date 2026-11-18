@@ -32,9 +32,27 @@ make -C tests/host run          # SAN= to build without the sanitizers
 | `test_driver` | The driver's own `main()` up to `can_resmgr_start()` and its shutdown; the TX ring (FIFO retirement, one TX command per refill, order breaks counted, failed, aborted and lost buffers, the ring going round from its last buffer with 1 to 4 buffers); bus-off (TX held through none and error passive, released at error active, in-flight frames aborted, ERCRST with `-a` and on RECOVER); warning limit, error passive and bus error types; interrupt service (spurious pulses, 64 frames per pulse, 8 passes per pulse, output off at every `InterruptUnmask()`, also when register writes are posted, a stopped core left quiet, refused unmasks counted); reader wake-ups (one return per waiting mailbox, RBNEI held while returns are left, a mailbox that wakes nobody dropped after 8 pulses); every devctl size check and refusal; `-R` and `-E`; the TX wait (`test_tx_wait`): bus-off aborts that finish on the next pulse and ones given up when the timer fires, with and without `-a`, a deferred `SET_TIMING` restart ended by a pulse, by the FINISH deadline, by the ABORT deadline, and the latest of two timings winning, the timer path and devctl code for `-u 3`, a stray timer devctl changing nothing, and SIGTERM shutdown with stuck, finishing and pending-restart TXT buffers (the only virtual sleep, at most 40 ms); a TX wait deadline and 32-bit timestamps across the 2^32 us wrap (`body_wrap`); the slow-TX log line, its rate limit and count (`body_slow_tx`) |
 | `test_fi` | The fault-injection build (`src/ctucanfd_fi.c` over the fake core): injected warning, bus-off and held TX completions go through `service()` and `finish_pulse()` on a tick, with no `InterruptUnmask()`; the RX budget holds next to an injected error, and readers reached during a tick are left to the next interrupt pulse with RBNEI held; bus-off with aborts slower than the 20 ms bound returns at once with the TX wait on, and the wait timer gives the aborts up at 20 ms with no sleep (`body_busoff_slow_abort`) |
 | `test_txw_orders` | The TX wait under every order of 12 events, 4 deep, from 15 start states: 311,040 sequences, each on a freshly started driver, with the invariants below checked after every event and every millisecond of virtual time |
+| `test_no_sleep` | No sleep on libcan's thread: a `SET_TIMING` restart, a bus-off and a bus-off with `-a`, each with 4 frames whose aborts never finish, while a client asks for statistics. The fake libcan counts every `nanosleep()` made inside the driver's callbacks (event handler, transmit, devctl); the count must be 0, and all 4 frames must be given up. Also builds against an older driver (see below) |
 | `test_supervisor` | `tools/ctucan-supervisor.c` with its spawn and sleep replaced: a SIGTERM during the restart delay starts no driver |
 
 The fake core models only what the code relies on, as `src/ctucanfd_regs.h` and `docs/DESIGN.md` describe it. It is not a model of the silicon or of QEMU. The driver runs on a virtual clock (`fake_clock_gettime()`, `fake_nanosleep()`), and the fake wait timer (`ctucan_timer_*` in `tests/host/fake_libcan.c`) records each arm and, when a test fires it, sends `CTUCAN_DEVCTL_TIMER` to the device path the driver gave it, as the helper process does on QNX. The tests check that libcan's thread never sleeps: the virtual sleep total stays 0 except in shutdown. The fake libcan follows the DDK text quoted in DESIGN.md section 3.1: the event handler is called until it returns NULL, and each returned RX mailbox wakes one blocked reader. It says nothing about how libcan schedules pulses against clients. The headers in `tests/host/shim/` define the QNX names the driver uses so it builds without the SDP; they are our own stand-ins, written from how this repository uses the names, not QNX's headers. Real interrupts, the PCI server and libcan itself are covered only by the end-to-end suite below.
+
+### No sleep in a libcan callback (`test_no_sleep`)
+
+`tests/host/test_no_sleep.c` uses only what every version of the driver has: client writes, interrupt pulses, the standard `SET_TIMING` devctl, `GET_XSTATS` fields and the fake core. So it also builds against another tree's driver source, with that tree's own headers and this tree's fakes:
+
+```
+make -C tests/host no_sleep_base BASE=/path/to/other/src
+```
+
+Results with clang, ASan and UBSan:
+
+| Driver | `SET_TIMING` restart | bus-off | bus-off with `-a` | Result |
+|---|---|---|---|---|
+| main 30fff05 (sleep-poll) | 200 sleeps in callbacks | 100 | 100 | fail 3 of 3 cases |
+| this tree | 0 | 0 | 0 | pass 3 of 3 cases |
+
+In both drivers all 4 stuck frames are given up and the restart runs once, so the cases do what they claim. The one sleep left in this tree is `tx_shutdown_wait()`. It is called only from `teardown()`, which runs after `can_resmgr_start()` has returned or when start-up fails before it, so never on libcan's thread while clients are served. The test does not count it.
 
 ### Every order of TX wait events (`test_txw_orders`)
 

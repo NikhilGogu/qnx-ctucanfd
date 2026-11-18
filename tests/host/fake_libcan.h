@@ -62,6 +62,9 @@ typedef struct {
 
     uint64_t  now_ns;           /* the virtual CLOCK_MONOTONIC */
     uint64_t  slept_ns;         /* virtual time passed in nanosleep() */
+    unsigned  in_cb;            /* > 0 while one of the driver's libcan callbacks runs */
+    unsigned  cb_sleeps;        /* nanosleep() calls made inside those callbacks */
+    uint64_t  cb_slept_ns;      /* and the virtual time they passed */
 
     bool      timer_up;         /* between ctucan_timer_init() and ctucan_timer_fini() */
     char      timer_path[64];

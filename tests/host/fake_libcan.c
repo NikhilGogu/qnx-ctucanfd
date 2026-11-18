@@ -303,12 +303,29 @@ int fake_run_driver(int (*drv_main)(int, char **), const char *args, void (*body
     return rc;
 }
 
+/* The driver's callbacks as libcan's thread calls them: lc.in_cb is up while
+ * one runs, so fake_nanosleep() can tell a sleep on libcan's thread. */
+static CANDEV *cb_event(void)
+{
+    lc.in_cb++;
+    CANDEV *c = lc.funcs->event_handler(lc.hdl, lc.code);
+    lc.in_cb--;
+    return c;
+}
+
+static void cb_transmit(CANDEV *c)
+{
+    lc.in_cb++;
+    lc.funcs->transmit(c);
+    lc.in_cb--;
+}
+
 unsigned fake_pulse(void)
 {
     unsigned n = 0;
     CANDEV *c;
 
-    while ((c = lc.funcs->event_handler(lc.hdl, lc.code)) != NULL) {
+    while ((c = cb_event()) != NULL) {
         n++;
         lc.returns++;
         if (n > 100000) {
@@ -316,7 +333,7 @@ unsigned fake_pulse(void)
             abort();
         }
         if (c->devtype == CANDEV_TYPE_TX) {
-            lc.funcs->transmit(c);
+            cb_transmit(c);
         } else if (!lc.nowake && c->wait_client_queue->cnt > 0 && c->msg_queue->msgcnt > 0) {
             canmsg_t *e = canmsg_dequeue_element(c->msg_queue);
             if (lc.nrx < FAKE_RX_LOG) {
@@ -342,7 +359,7 @@ int fake_write(unsigned dev, const CAN_MSG *m)
     }
     e->cmsg = *m;
     canmsg_queue_element(c->msg_queue, e);
-    lc.funcs->transmit(c);
+    cb_transmit(c);
     return EOK;
 }
 
@@ -362,7 +379,9 @@ int fake_devctl(unsigned dev, int dcmd, void *data, size_t in, size_t out)
     if (in > 0) {
         memcpy(&u.m.payload, data, in);
     }
+    lc.in_cb++;
     int rc = lc.funcs->devctl(lc.dev[dev], &u.m.hdr);
+    lc.in_cb--;
     if (out > 0) {
         memcpy(data, &u.m.payload, out);
     }
@@ -392,6 +411,10 @@ int fake_nanosleep(const struct timespec *req, struct timespec *rem)
 
     lc.now_ns += ns;
     lc.slept_ns += ns;
+    if (lc.in_cb > 0) {
+        lc.cb_sleeps++;
+        lc.cb_slept_ns += ns;
+    }
     if (rem != NULL) {
         rem->tv_sec = 0;
         rem->tv_nsec = 0;

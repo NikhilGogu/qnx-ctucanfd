@@ -14,6 +14,7 @@ This file starts with the changes after commit 30fff05; earlier history is in `g
 ### Added
 
 - `tests/host/test_txw_orders.c`: every sequence of 4 TX wait events from 15 start states (311,040 sequences), with invariants checked after each event (`docs/TESTS.md`).
+- `tests/host/test_no_sleep.c`: counts `nanosleep()` calls inside libcan callbacks during a `SET_TIMING` restart and bus-off with stuck frames. It builds against older drivers too (`make -C tests/host no_sleep_base BASE=...`); main 30fff05 fails it.
 - `scripts/tests/signature.py` and `tools/ctucan-latprobe.c`: `freeze_free` (the 20 ms abort bound with no traffic, and no request waits over 5 ms meanwhile) and `kill_storm` (60 SIGKILLs under 1 ms telemetry and host load). Main fails `freeze_free` with a 20 ms wait; this tree passes both (`docs/TESTS.md`).
 - Slow TX diagnostics: TXT buffers that take more than 3 ms to retire are counted and logged. The log is rate-limited to one line per 100 ms.
 - ecu-sim prints up to 32 overrun and EAGAIN lines per run.

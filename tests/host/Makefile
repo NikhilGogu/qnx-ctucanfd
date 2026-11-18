@@ -13,7 +13,7 @@ SAN     ?= -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-fram
 HW      := $(SRC)/ctucanfd_hw.c fake_core.c
 HDRS    := $(SRC)/ctucanfd_hw.h $(SRC)/ctucanfd_regs.h $(SRC)/ctucanfd_time.h fake_core.h check.h $(wildcard shim/*.h shim/*/*.h)
 DRV     := $(SRC)/dev-can-ctucanfd.c $(SRC)/ctucanfd_devctl.h $(SRC)/ctucanfd_timer.h fake_libcan.c fake_libcan.h
-TESTS   := test_dlc_timing test_frames test_core test_time test_driver test_fi test_txw_orders test_supervisor
+TESTS   := test_dlc_timing test_frames test_core test_time test_driver test_fi test_txw_orders test_no_sleep test_supervisor
 
 all: $(addprefix $(BUILD)/,$(TESTS))
 
@@ -31,6 +31,18 @@ $(BUILD)/test_driver: test_driver.c $(HW) $(HDRS) $(DRV) driver_harness.h | $(BU
 $(BUILD)/test_txw_orders: test_txw_orders.c $(HW) $(HDRS) $(DRV) driver_harness.h | $(BUILD)
 	$(CC) $(CFLAGS) $(SAN) -o $@ $< $(HW) fake_libcan.c
 
+# no sleep inside libcan's callbacks; includes the driver like test_driver
+$(BUILD)/test_no_sleep: test_no_sleep.c $(HW) $(HDRS) $(DRV) driver_harness.h | $(BUILD)
+	$(CC) $(CFLAGS) $(SAN) -o $@ $< $(HW) fake_libcan.c
+
+# The same test against another tree's driver, for comparison:
+#   make no_sleep_base BASE=/path/to/other/src
+# Only dev-can-ctucanfd.c and its own headers come from BASE.
+no_sleep_base: test_no_sleep.c $(HW) $(HDRS) $(DRV) driver_harness.h | $(BUILD)
+	test -f $(BASE)/dev-can-ctucanfd.c
+	$(CC) -I$(BASE) $(CFLAGS) $(SAN) -o $(BUILD)/test_no_sleep_base $< $(HW) fake_libcan.c
+	./$(BUILD)/test_no_sleep_base
+
 # the fault-injection build: the injector sits between the driver and the fake core
 FI      := $(SRC)/ctucanfd_fi.c fi_glue.c fake_core_fi.c fake_core.c
 $(BUILD)/test_fi: test_fi.c $(HW) $(HDRS) $(DRV) $(FI) driver_harness.h | $(BUILD)
@@ -46,4 +58,4 @@ run: all
 clean:
 	rm -rf $(BUILD)
 
-.PHONY: all run clean
+.PHONY: all run clean no_sleep_base
