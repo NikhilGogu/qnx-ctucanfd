@@ -84,9 +84,10 @@ Results with clang, ASan and UBSan:
 
 ## Signature tests (`scripts/tests/signature.py`)
 
-Two target tests for properties that need the driver's design, run on their own: `scripts/tests/signature.py --target a --if vcan0 [freeze_free] [kill_storm]`. They use only ctutest.py's helpers, the standard CAN devctls, the fault-injection scenarios main has, and `tools/ctucan-latprobe.c`, which sends `CAN_DEVCTL_GET_STATS` back to back and reports the longest answer. So the same file runs against older drivers.
+Target tests for properties that need the driver's design, run on their own: `scripts/tests/signature.py --target a --if vcan0 [--rate N] [freeze_free] [rx_loss] [kill_storm]`. They use only ctutest.py's helpers, the standard CAN devctls, the fault-injection scenarios main has, and `tools/ctucan-latprobe.c`, which sends `CAN_DEVCTL_GET_STATS` back to back and reports the longest answer. So the same file runs against older drivers.
 
 - `freeze_free`: bus-off, and a `SET_TIMING` restart, each with 4 frames that never finish. Passes only if both hold: with nothing else running, the frames are given up at the 20 ms bound (`tx_abort_forced 4`), and while a second client asks for statistics back to back no answer takes over 5 ms.
+- `rx_loss`: a `SET_TIMING` restart halfway through 2 s of 64-byte frames with sequence numbers from the host at 1000 frames/s, read by `canfd-test seqrecv` on the target. A plain restart with nothing in flight runs first, on a fresh driver and the same load, as the control. Then the same restart with 4 frames in the TXT buffers that never finish. Pass: no RX FIFO overflow, nothing out of order or bad, and no more frames lost than the control lost. The result line also says whether no frame was lost at all. 1000 frames/s is well inside what the bus carries (about 2700 per second for 64-byte frames at 500 kbit/s and 2 Mbit/s). On the QEMU target every driver takes in about 2000 per second at most and overflows the FIFO above that, so a higher rate tests QEMU, not the driver.
 - `kill_storm`: ctucan-supervisor, ecu-sim at 1 ms, 500 frames/s of host load, 60 SIGKILLs 0.5 s apart, half by name and half of the driver alone. One gap per kill, telemetry order and CRC intact, every death and restart seen by the supervisor, and the same number of driver processes after as before, none DEAD.
 
 AWS run 2, QNX 8.0 in QEMU, 3 rounds each, interleaved:
@@ -98,6 +99,18 @@ AWS run 2, QNX 8.0 in QEMU, 3 rounds each, interleaved:
 | this tree (timer helper process) | pass 3/3 | 0.69 to 0.96 ms | pass 3/3, no helper left behind |
 
 Idle, the longest answer was 0.15 to 0.30 ms on all three.
+
+`rx_loss`, AWS run 3, QNX 8.0 in QEMU, 5 rounds each, interleaved. Frames lost by the plain restart (control) and by the restart with 4 stuck frames; in brackets, how many of those the reset flushed from the RX FIFO:
+
+| Driver | control lost | stuck-frame restart lost | `rx_loss` | No frame lost at all |
+|---|---|---|---|---|
+| main 30fff05 | 1, 1, 1, 1, 1 | 21, 22, 21, 21, 21 (21 flushed each) | fail 5/5 | 0/5 |
+| 0110e39, before the RX drain | 1, 1, 1, 1, 1 | 1, 2, 1, 1, 1 (1 flushed each) | pass 4/5 | 0/5 |
+| this tree | 0, 1, 0, 0, 1 | 0, 0, 0, 1, 0 (0 flushed) | pass 4/5 | 4/5 |
+
+FIFO overflows were 0 in every run. Main waits 20 ms inside the request with the FIFO unread, and the reset then flushes what came in. In this tree the reset flushed nothing; the one frame lost in round 4 was not in the FIFO, so it came while the core was off the bus. That round fails the rule because its control lost none.
+
+`kill_storm`, AWS run 3, 3 rounds each, interleaved: main 30fff05 pass 3/3, this tree pass 3/3. One earlier run of 0110e39 failed the count: 64 gaps over 5 ms for 60 kills, the 4 extra ones 5.2 to 6.8 ms long. Main showed 2 such extra gaps in another run. A 5 ms threshold sits close to what host load alone can cause. About half the gaps are near 60 ms on every driver: kills come 0.5 s apart, and the supervisor waits 50 ms before it restarts a driver that died less than 1 s after its start. With kills 1.2 s apart the supervisor added no delay, and the gaps at the kills were 5.3 to 12.2 ms on both drivers.
 
 ## The suite and its results
 

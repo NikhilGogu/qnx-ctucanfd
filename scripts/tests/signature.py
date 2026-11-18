@@ -9,6 +9,13 @@
                request waits more than 5 ms meanwhile. A driver that waits inside the request
                keeps the bound but freezes every client for 20 to 40 ms; one that never waits
                but has no wake-up of its own misses the bound when nothing else happens.
+  rx_loss      A SET_TIMING restart with 4 frames that do not finish, while the host sends 64-byte
+               frames with sequence numbers at a rate the bus could carry (--rate, 1000 frames/s by
+               default) and a reader on the target checks them. A plain restart with nothing in
+               flight, on the same load, runs first as the control. Pass: no RX FIFO overflow, no
+               frame out of order or bad, and no more frames lost than the control lost. The line
+               also says whether no frame was lost at all. A driver that waits inside the request
+               leaves the RX FIFO alone meanwhile, and the restart's reset then empties it.
   kill_storm   60 SIGKILLs of the driver under a 1 ms telemetry stream and 500 frames/s of host
                load, with ctucan-supervisor restarting it: half by name (driver and helper), half
                the driver alone. Every kill is one short gap, the stream keeps its order and CRC,
@@ -17,13 +24,14 @@
 Runs against any tree that builds ctucan-latprobe, main included: the tests use only ctutest.py's
 helpers, the standard CAN devctls and the fault-injection scenarios main has.
 
-  scripts/tests/signature.py --target a --if vcan0 [freeze_free] [kill_storm]
+  scripts/tests/signature.py --target a --if vcan0 [--rate N] [freeze_free] [rx_loss] [kill_storm]
 """
 import argparse
 import os
 import re
 import subprocess
 import sys
+import threading
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -105,6 +113,85 @@ def t_freeze_free(t, bus):
             f"idle {show(base)}")
 
 
+RATE = 1000            # rx_loss host load, frames/s. A 64-byte CAN FD frame takes about 360 us at the
+                       # driver's default 500 kbit/s and 2 Mbit/s, so a real bus carries about 2700/s.
+                       # On the QEMU target every driver takes in about 2000/s at most, and the reader
+                       # (one devctl per frame) falls behind at 2000/s, so the test stays well below.
+
+
+def flood(bus, cid, n, rate):
+    """n frames with canfd-test's sequenced payload, paced to `rate` frames/s on the host clock."""
+    t0 = time.monotonic()
+    for q in range(n):
+        ahead = t0 + q / rate - time.monotonic()
+        if ahead > 0.0005:
+            time.sleep(ahead)
+        bus.send(cid, c.pattern(q, 64))
+
+
+def restart_under_load(t, bus, rate, secs, stuck):
+    """One SET_TIMING restart halfway through `secs` of sequenced host frames at `rate`, read by
+    canfd-test seqrecv on the target. With `stuck`, 4 frames that never finish are in the TXT buffers
+    first, so the restart waits for the TX wait. Returns the counts."""
+    n = int(rate * secs)
+    t.driver("-q 1024", variant=c.FI, force=True)
+    if stuck:
+        c.fi(t, 4, 5000, 4)
+        t.ssh(f"{c.TEST} seqsend {c.TX1} 2F4 16 4 0 >/dev/null")
+    x0, s0 = t.xstats(), t.stats()
+    t.bg(f"{c.TEST} seqrecv {c.RX0} {n} 60000", "/tmp/rxl.log")
+    time.sleep(0.3)
+    bus.drain()
+    th = threading.Thread(target=flood, args=(bus, 0x2A9, n, rate))
+    th.start()
+    time.sleep(secs / 2)
+    out = t.out(f"{c.TEST} timing {c.RX0} 4 43 6 6")
+    th.join()
+    # The reader ends after n frames. Frames that were lost are made up by more frames after the
+    # last one (sequence n, n+1, ...), one every 5 ms, so it ends and counts each loss as a gap.
+    time.sleep(0.5)
+    log, extra = "", 0
+    while extra < 4000:
+        log = t.out("cat /tmp/rxl.log")
+        if "seqrecv:" in log:
+            break
+        for _ in range(20):
+            bus.send(0x2A9, c.pattern(n + extra, 64))
+            extra += 1
+            time.sleep(0.005)
+    x1, s1 = t.xstats(), t.stats()
+    m = re.search(r"seqrecv: got (\d+) of (\d+), bad (\d+), missing (\d+), out_of_order (\d+)", log)
+    c.check(m is not None, f"no seqrecv result: {log.strip()}")
+    got, _, bad, missing, ooo = map(int, m.groups())
+    r = {"n": n, "extra": extra, "got": got, "lost": missing, "ooo": ooo, "bad": bad,
+         "ovf": s1["hw_overflow"] - s0["hw_overflow"], "swq": s1["swq_full"] - s0["swq_full"],
+         "flushed": x1["rx_flushed"] - x0["rx_flushed"]}
+    r["text"] = (f"{n} sent and {extra} after them: read {got}, lost {missing}, out of order {ooo}, bad {bad}; "
+                 f"FIFO overflows {r['ovf']}, flushed by the reset {r['flushed']}, mailbox queue full {r['swq']}")
+    ok = "No error" in out and x1["restarts"] - x0["restarts"] == 1
+    if stuck:
+        ok = ok and x0["inflight"] == 4 and x1["tx_aborted"] - x0["tx_aborted"] == 4
+    else:
+        ok = ok and x0["inflight"] == 0
+    c.check(ok, f"restart ({'4 stuck frames' if stuck else 'nothing in flight'}): {out.strip()} {x1}; {r['text']}")
+    return r
+
+
+def t_rx_loss(t, bus, rate=None, secs=2.0):
+    """SET_TIMING restart with stuck frames under host RX load loses no more than a plain restart."""
+    rate = rate or RATE
+    ctl = restart_under_load(t, bus, rate, secs, stuck=False)
+    t.stop_all()
+    run = restart_under_load(t, bus, rate, secs, stuck=True)
+    strict = run["got"] == run["n"] and run["lost"] == 0 and run["ooo"] == 0 and run["bad"] == 0 and run["ovf"] == 0
+    detail = (f"{rate} frames/s; plain restart (control): {ctl['text']}; restart with 4 stuck frames: "
+              f"{run['text']}; no frame lost at all: {'yes' if strict else 'no'}")
+    c.check(run["ovf"] == 0 and run["ooo"] == 0 and run["bad"] == 0, f"FIFO overflow or bad frames: {detail}")
+    c.check(run["lost"] <= ctl["lost"], f"lost {run['lost']} with stuck frames, {ctl['lost']} in the plain "
+            f"restart: {detail}")
+    return detail
+
+
 def procs(t):
     """dev-can-ctucanfd processes as (pid, ppid), and how many are DEAD."""
     out = t.out("pidin -p dev-can-ctucanfd family 2>/dev/null")
@@ -169,15 +256,17 @@ def t_kill_storm(t, bus, kills=60, every=0.5):
             f"respawn; {len(pp1)} driver process(es) after, as before, 0 DEAD")
 
 
-TESTS = {"freeze_free": t_freeze_free, "kill_storm": t_kill_storm}
+TESTS = {"freeze_free": t_freeze_free, "rx_loss": t_rx_loss, "kill_storm": t_kill_storm}
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--target", default="tc")
     ap.add_argument("--if", dest="ifname", default="vcan0")
+    ap.add_argument("--rate", type=int, default=RATE, help=f"rx_loss host load, frames/s ({RATE})")
     ap.add_argument("tests", nargs="*")
     a = ap.parse_args()
+    TESTS["rx_loss"] = lambda t, bus: t_rx_loss(t, bus, a.rate)
     t, bus = c.Target(a.target), c.Bus(a.ifname)
     failed = 0
     for n in a.tests or list(TESTS):
