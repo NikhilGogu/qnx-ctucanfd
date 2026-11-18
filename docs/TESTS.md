@@ -33,6 +33,7 @@ make -C tests/host run          # SAN= to build without the sanitizers
 | `test_fi` | The fault-injection build (`src/ctucanfd_fi.c` over the fake core): injected warning, bus-off and held TX completions go through `service()` and `finish_pulse()` on a tick, with no `InterruptUnmask()`; the RX budget holds next to an injected error, and readers reached during a tick are left to the next interrupt pulse with RBNEI held; bus-off with aborts slower than the 20 ms bound returns at once with the TX wait on, and the wait timer gives the aborts up at 20 ms with no sleep (`body_busoff_slow_abort`) |
 | `test_txw_orders` | The TX wait under every order of 12 events, 4 deep, from 15 start states: 311,040 sequences, each on a freshly started driver, with the invariants below checked after every event and every millisecond of virtual time |
 | `test_no_sleep` | No sleep on libcan's thread: a `SET_TIMING` restart, a bus-off and a bus-off with `-a`, each with 4 frames whose aborts never finish, while a client asks for statistics. The fake libcan counts every `nanosleep()` made inside the driver's callbacks (event handler, transmit, devctl); the count must be 0, and all 4 frames must be given up. Also builds against an older driver (see below) |
+| `test_rx_restart` | No RX frame lost to a restart: 10 frames in the RX FIFO and 10 blocked readers before a `SET_TIMING` restart with nothing in flight, before one deferred behind 4 frames whose aborts never finish, and during a bus-off with `-a` and the same 4 frames. No pulse runs until the restart is over. All 10 frames must reach the readers in order and the reset must flush none. Also builds against an older driver (see below) |
 | `test_supervisor` | `tools/ctucan-supervisor.c` with its spawn and sleep replaced: a SIGTERM during the restart delay starts no driver |
 
 The fake core models only what the code relies on, as `src/ctucanfd_regs.h` and `docs/DESIGN.md` describe it. It is not a model of the silicon or of QEMU. The driver runs on a virtual clock (`fake_clock_gettime()`, `fake_nanosleep()`), and the fake wait timer (`ctucan_timer_*` in `tests/host/fake_libcan.c`) records each arm and, when a test fires it, sends `CTUCAN_DEVCTL_TIMER` to the device path the driver gave it, as the helper process does on QNX. The tests check that libcan's thread never sleeps: the virtual sleep total stays 0 except in shutdown. The fake libcan follows the DDK text quoted in DESIGN.md section 3.1: the event handler is called until it returns NULL, and each returned RX mailbox wakes one blocked reader. It says nothing about how libcan schedules pulses against clients. The headers in `tests/host/shim/` define the QNX names the driver uses so it builds without the SDP; they are our own stand-ins, written from how this repository uses the names, not QNX's headers. Real interrupts, the PCI server and libcan itself are covered only by the end-to-end suite below.
@@ -53,6 +54,22 @@ Results with clang, ASan and UBSan:
 | this tree | 0 | 0 | 0 | pass 3 of 3 cases |
 
 In both drivers all 4 stuck frames are given up and the restart runs once, so the cases do what they claim. The one sleep left in this tree is `tx_shutdown_wait()`. It is called only from `teardown()`, which runs after `can_resmgr_start()` has returned or when start-up fails before it, so never on libcan's thread while clients are served. The test does not count it.
+
+### No RX frame lost to a restart (`test_rx_restart`)
+
+The controller reset empties the RX FIFO. Before the reset the driver now reads out the frames in it and queues them for the readers: once while the core is on the bus, and once after it has left the bus. The pulse that RBNEI already brought, or the one the restart runs in, wakes the readers. Bus-off recovery is COMMAND.ERCRST, not a reset, so the FIFO is kept there in every version. Like `test_no_sleep`, the test builds against another tree's driver:
+
+```
+make -C tests/host rx_restart_base BASE=/path/to/other/src
+```
+
+Results with clang, ASan and UBSan:
+
+| Driver | plain restart | restart behind 4 stuck frames | bus-off with `-a` | Result |
+|---|---|---|---|---|
+| main 30fff05 | 10 of 10 flushed, 0 read | 10 flushed, 0 read | 10 of 10 read | fail 2 of 3 cases |
+| this tree before the drain (0110e39) | 10 flushed, 0 read | 10 flushed, 0 read | 10 of 10 read | fail 2 of 3 cases |
+| this tree | 10 of 10 read in order, 0 flushed | 10 of 10, 0 flushed | 10 of 10 | pass 3 of 3 cases |
 
 ### Every order of TX wait events (`test_txw_orders`)
 

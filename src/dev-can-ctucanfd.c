@@ -935,12 +935,33 @@ static void fi_tick(drv_t *d)
 
 /* Stops, resets and starts the core with d->cfg. Called with the TXT buffers
  * empty (restart_request()), or with frames still in them only when the TX
- * wait gave those up. */
+ * wait gave those up.
+ *
+ * The reset empties the RX FIFO, so a running core's frames are read out and
+ * queued for the readers first: once while the core is still on the bus, and
+ * again after it has left the bus for what arrived in between. A core that is
+ * already stopped (a reset that failed) is not read. Only what is left
+ * after that (a frame whose format word did not match goes with the whole
+ * FIFO, as in service()) is counted in rx_flushed. Frames left in the FIFO
+ * between pulses mean RBNEI is pending, so an interrupt pulse is queued or
+ * comes when the line is unmasked; that pulse, or the one this restart runs
+ * in, wakes the readers. */
 static int restart_now(drv_t *d)
 {
-    /* the reset empties the RX FIFO: count what it held */
+    unsigned n = 0;
+
+    if (d->hw_started) {
+        /* each pass takes the frames counted at its start, so it ends */
+        n = rx_drain(d, ctucan_hw_rx_frames(&d->hw));
+        ctucan_hw_stop(&d->hw);
+        n += rx_drain(d, ctucan_hw_rx_frames(&d->hw));
+    } else {
+        ctucan_hw_stop(&d->hw);
+    }
+    if (n > 0) {
+        can_slogf(SLOG2_INFO, DRV_NAME ": restart: %u frame(s) read out of the RX FIFO before the reset", n);
+    }
     d->x.rx_flushed += ctucan_hw_rx_frames(&d->hw);
-    ctucan_hw_stop(&d->hw);
     d->hw_started = false;
     d->suppressed = true;       /* ctucan_hw_stop() cleared INT_ENA */
     int rrc = ctucan_hw_reset(&d->hw);
