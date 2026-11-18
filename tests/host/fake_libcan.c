@@ -14,6 +14,7 @@
 #include <pci/pci.h>
 #include "fake_core.h"
 #include "fake_libcan.h"
+#include "ctucanfd_timer.h"
 
 fake_libcan_t lc;
 
@@ -281,6 +282,7 @@ int fake_run_driver(int (*drv_main)(int, char **), const char *args, void (*body
 
     memset(&lc, 0, sizeof(lc));
     lc.ena_off_at_every_unmask = true;
+    lc.now_ns = FAKE_CLOCK_START_NS;
     fake_init(&hw);
     g_body = body;
     argv[argc++] = "dev-can-ctucanfd";
@@ -370,4 +372,94 @@ int fake_devctl(unsigned dev, int dcmd, void *data, size_t in, size_t out)
 void fake_block_readers(unsigned dev, unsigned n)
 {
     lc.dev[dev]->wait_client_queue->cnt += n;
+}
+
+/* ---- clock and TX wait timer -------------------------------------------- */
+
+int fake_clock_gettime(clockid_t id, struct timespec *ts)
+{
+    if (id != CLOCK_MONOTONIC) {
+        return clock_gettime(id, ts);
+    }
+    ts->tv_sec = (time_t)(lc.now_ns / 1000000000ull);
+    ts->tv_nsec = (long)(lc.now_ns % 1000000000ull);
+    return 0;
+}
+
+int fake_nanosleep(const struct timespec *req, struct timespec *rem)
+{
+    uint64_t ns = (uint64_t)req->tv_sec * 1000000000ull + (uint64_t)req->tv_nsec;
+
+    lc.now_ns += ns;
+    lc.slept_ns += ns;
+    if (rem != NULL) {
+        rem->tv_sec = 0;
+        rem->tv_nsec = 0;
+    }
+    return 0;
+}
+
+void fake_advance_ms(unsigned ms)
+{
+    lc.now_ns += (uint64_t)ms * 1000000ull;
+}
+
+uint64_t fake_now_ms(void)
+{
+    return lc.now_ns / 1000000ull;
+}
+
+int ctucan_timer_init(const char *path, int dcmd)
+{
+    snprintf(lc.timer_path, sizeof(lc.timer_path), "%s", path);
+    lc.timer_dcmd = dcmd;
+    lc.timer_up = true;
+    lc.timer_at_ms = 0;
+    return EOK;
+}
+
+void ctucan_timer_arm(uint64_t at_ms)
+{
+    if (!lc.timer_up) {
+        return;
+    }
+    lc.timer_at_ms = at_ms;
+    lc.timer_arms += at_ms != 0;
+    if (lc.on_timer_arm != NULL) {
+        lc.on_timer_arm(at_ms);
+    }
+}
+
+void ctucan_timer_fini(void)
+{
+    lc.timer_up = false;
+    lc.timer_at_ms = 0;
+}
+
+bool fake_timer_fire(void)
+{
+    unsigned unit, rx;
+
+    if (!lc.timer_up || lc.timer_at_ms == 0 || fake_now_ms() < lc.timer_at_ms) {
+        return false;
+    }
+    if (sscanf(lc.timer_path, "/dev/can%u/rx%u", &unit, &rx) != 2 || rx >= lc.ndev || lc.dev[rx] == NULL) {
+        fprintf(stderr, "fake_timer_fire: no device for %s\n", lc.timer_path);
+        abort();
+    }
+    lc.timer_at_ms = 0;
+    lc.timer_fired++;
+    (void)fake_devctl(rx, lc.timer_dcmd, NULL, 0, 0);
+    return true;
+}
+
+bool fake_timer_run(void)
+{
+    if (!lc.timer_up || lc.timer_at_ms == 0) {
+        return false;
+    }
+    if (fake_now_ms() < lc.timer_at_ms) {
+        lc.now_ns = lc.timer_at_ms * 1000000ull;
+    }
+    return fake_timer_fire();
 }

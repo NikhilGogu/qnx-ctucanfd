@@ -55,6 +55,7 @@ static atomic_uint g_reopens, g_answers, g_echoes, g_soc = 80;
 
 #define ECHO_REQ 0x1e0u
 #define ECHO_RSP 0x1e8u
+#define LATE_NOTES 32u  /* overrun and EAGAIN lines printed per run (restart_under_load reads them) */
 static volatile sig_atomic_t g_stop;
 
 static uint64_t now_us(void)
@@ -213,6 +214,7 @@ int main(int argc, char *argv[])
     uint64_t t0 = now_us();
     unsigned long sent = 0, missed = 0;
     unsigned long overruns = 0;
+    unsigned noted = 0;     /* late periods and EAGAIN refusals printed so far, at most LATE_NOTES */
     for (uint32_t seq = 0; !g_stop && (g_count == 0 || seq < g_count); seq++) {
         ts_add_us(&next, g_period_us);
         clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &next, NULL);
@@ -228,6 +230,12 @@ int main(int argc, char *argv[])
             missed += skip;
             overruns++;
             ts_add_us(&next, (uint64_t)skip * g_period_us);
+            if (noted < LATE_NOTES) {
+                noted++;
+                printf("ecu-sim: overrun at seq %u: woke %lld us late, %u periods skipped, monotonic %lld.%06ld s\n",
+                       seq, (long long)lag, skip, (long long)now.tv_sec, now.tv_nsec / 1000);
+                fflush(stdout);
+            }
         }
 
         /* a slowly discharging pack with some ripple */
@@ -256,6 +264,12 @@ int main(int argc, char *argv[])
             sent++;
         } else {
             missed++;   /* this period's frame is lost; the sequence moves on */
+            if (rc == EAGAIN && noted < LATE_NOTES) {
+                noted++;
+                printf("ecu-sim: EAGAIN at seq %u: write refused, frame dropped, monotonic %lld.%06ld s\n", seq,
+                       (long long)now.tv_sec, now.tv_nsec / 1000);
+                fflush(stdout);
+            }
             if (rc != EAGAIN) {
                 fd = reopen(g_tx, fd, O_WRONLY, "telemetry");
             }

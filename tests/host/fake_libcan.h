@@ -12,6 +12,13 @@
  * fake_run_driver() runs the driver's main(); can_resmgr_start() then runs
  * the test body while the driver is up, and returning from it stands for
  * the SIGTERM that ends the driver.
+ *
+ * It also stands in for CLOCK_MONOTONIC and nanosleep() (driver_harness.h
+ * maps the driver's calls here): time is virtual, starts at
+ * FAKE_CLOCK_START_NS and moves only when a test or a sleep moves it. And it
+ * stands in for the TX wait timer (src/ctucanfd_timer.h): the arm is
+ * recorded, and fake_timer_fire() does what the helper thread does on QNX,
+ * a CTUCAN_DEVCTL_TIMER to the device the driver named.
  */
 #ifndef CTUCAN_HOST_FAKE_LIBCAN_H
 #define CTUCAN_HOST_FAKE_LIBCAN_H
@@ -19,10 +26,12 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <time.h>
 #include <hw/libcan.h>
 
 #define FAKE_MAX_DEVS   32u
 #define FAKE_RX_LOG     256u
+#define FAKE_CLOCK_START_NS 10000000000ull  /* 10 s */
 
 typedef struct {
     unsigned dev;               /* dev_unit of the mailbox the reader blocked on */
@@ -50,6 +59,18 @@ typedef struct {
 
     unsigned  slog_lines;
     char      last_log[256];
+
+    uint64_t  now_ns;           /* the virtual CLOCK_MONOTONIC */
+    uint64_t  slept_ns;         /* virtual time passed in nanosleep() */
+
+    bool      timer_up;         /* between ctucan_timer_init() and ctucan_timer_fini() */
+    char      timer_path[64];
+    int       timer_dcmd;
+    uint64_t  timer_at_ms;      /* armed for this now_ms(); 0 = disarmed */
+    unsigned  timer_arms;       /* ctucan_timer_arm() calls with a time */
+    unsigned  timer_fired;      /* CTUCAN_DEVCTL_TIMER sent by fake_timer_fire() */
+    void    (*on_timer_arm)(uint64_t at_ms);    /* observer for test_txw_orders.c, NULL otherwise:
+                                                 * every ctucan_timer_arm() while the timer is up */
 } fake_libcan_t;
 
 extern fake_libcan_t lc;
@@ -73,5 +94,19 @@ int fake_devctl(unsigned dev, int dcmd, void *data, size_t in, size_t out);
 
 /* n more clients blocked reading `dev`. */
 void fake_block_readers(unsigned dev, unsigned n);
+
+/* The virtual clock. */
+int fake_clock_gettime(clockid_t id, struct timespec *ts);
+int fake_nanosleep(const struct timespec *req, struct timespec *rem);
+void fake_advance_ms(unsigned ms);
+uint64_t fake_now_ms(void);
+
+/* If the timer is armed and its time has come: disarms it (one shot) and
+ * sends its devctl as the helper thread would. Returns whether it did. */
+bool fake_timer_fire(void);
+
+/* Moves the clock to the armed time, if later, and fires. Returns whether
+ * the timer was armed. */
+bool fake_timer_run(void);
 
 #endif

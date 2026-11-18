@@ -6,8 +6,8 @@ CFLAGS  ?= -O2 -g
 CFLAGS  += -std=gnu11 -Wall -Wextra -Werror=implicit-function-declaration
 OUT     := build/$(ARCH)
 
-DRV_SRC := src/dev-can-ctucanfd.c src/ctucanfd_hw.c
-DRV_HDR := src/ctucanfd_hw.h src/ctucanfd_regs.h src/ctucanfd_devctl.h
+DRV_SRC := src/dev-can-ctucanfd.c src/ctucanfd_hw.c src/ctucanfd_timer.c
+DRV_HDR := src/ctucanfd_hw.h src/ctucanfd_regs.h src/ctucanfd_devctl.h src/ctucanfd_time.h src/ctucanfd_timer.h
 
 ifeq ($(FI),1)
 OUT     := $(OUT)-fi
@@ -16,7 +16,7 @@ DRV_SRC += src/ctucanfd_fi.c
 endif
 
 all: $(OUT)/dev-can-ctucanfd $(OUT)/canfd-test $(OUT)/ctucan-probe $(OUT)/ecu-sim $(OUT)/ctucan-supervisor \
-     $(OUT)/ctucan-hangsrv
+     $(OUT)/ctucan-hangsrv $(OUT)/ctucan-latprobe
 
 $(OUT):
 	mkdir -p $@
@@ -36,6 +36,10 @@ $(OUT)/ctucan-supervisor: tools/ctucan-supervisor.c | $(OUT)
 
 # test helper for the supervisor tests
 $(OUT)/ctucan-hangsrv: tools/test-hangsrv.c | $(OUT)
+	$(CC) $(CFLAGS) -o $@ $<
+
+# request latency probe for scripts/tests/signature.py
+$(OUT)/ctucan-latprobe: tools/ctucan-latprobe.c | $(OUT)
 	$(CC) $(CFLAGS) -o $@ $<
 
 $(OUT)/ctucan-probe: probe/ctucan_probe.c | $(OUT)

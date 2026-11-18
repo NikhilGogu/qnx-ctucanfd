@@ -584,25 +584,39 @@ def t_restart_under_load(t, bus, kills=3):
     cd = Candump(bus_if(bus), "2F8:7FF")
     load = subprocess.Popen(["cangen", bus_if(bus), "-I", "2A6", "-L", "64", "-f", "-b", "-g", "2", "-D", "i"])
     time.sleep(2)
+    kill_at = []        # host time before and after each kill's ssh, the same clock as candump -L
     for _ in range(kills):
+        k0 = time.time()
         t.ssh("slay -s KILL dev-can-ctucanfd")
+        kill_at.append((k0, time.time()))
         time.sleep(2)
     load.terminate()
     load.wait()
     frames = cd.stop()
     t.ssh("slay -s TERM ecu-sim; sleep 0.3")
     sup, ecu = t.out("cat /tmp/sup.log"), t.out("cat /tmp/ecu.log")
+    slow = t.out("slog2info 2>/dev/null | grep 'slow TX' | tail -12")
     t.stop_all()
     seqs = [seq_of(f["data"]) for f in frames]
-    holes = [(b["t"] - a["t"], sa, sb) for a, b, sa, sb in zip(frames, frames[1:], seqs, seqs[1:])
+    holes = [(b["t"] - a["t"], sa, sb, a["t"]) for a, b, sa, sb in zip(frames, frames[1:], seqs, seqs[1:])
              if b["t"] - a["t"] > 0.005]
-    check(len(holes) == kills, f"{len(holes)} gaps over 5 ms for {kills} kills: {holes[:6]}")
+    if len(holes) != kills:
+        # Diagnostics for the failure message only (docs/TESTS.md, restart_under_load): where each gap
+        # starts against the kill windows, the driver's slow-TX lines and ecu-sim's late wake-ups.
+        def where(at):
+            near = min(range(kills), key=lambda i: abs(at - kill_at[i][0]))
+            return f"{at - kill_at[near][0]:+.3f} s from kill {near + 1} (ssh took {kill_at[near][1] - kill_at[near][0]:.3f} s)"
+        late = [ln for ln in ecu.splitlines() if "overrun" in ln or "EAGAIN" in ln][:12]
+        detail = "\n".join([f"gap {g * 1000:.1f} ms seq {sa}->{sb}, {where(at)}" for g, sa, sb, at in holes[:8]]
+                            + ["driver slow TX:"] + (slow.strip().splitlines() or ["none"])
+                            + ["ecu-sim late:"] + (late or ["none"]))
+        check(False, f"{len(holes)} gaps over 5 ms for {kills} kills:\n{detail}")
     check(all(b > a for a, b in zip(seqs, seqs[1:])), "sequence went backwards")
     ready = [float(x) for x in re.findall(r"ready \([^)]*\) ([\d.]+) ms after spawn", sup)]
     check(sup.count("died") == kills and len(ready) == kills + 1, f"supervisor log:\n{sup}")
     reopen = [float(x) for x in re.findall(r"telemetry reopened \S+ after ([\d.]+) ms", ecu)]
-    gaps_ms = ", ".join(f"{g * 1000:.1f}" for g, _, _ in holes)
-    lost = ", ".join(str(b - a - 1) for _, a, b in holes)
+    gaps_ms = ", ".join(f"{g * 1000:.1f}" for g, _, _, _ in holes)
+    lost = ", ".join(str(b - a - 1) for _, a, b, _ in holes)
     return (f"{kills} kills under host load: telemetry gaps {gaps_ms} ms (1 ms period; periods lost {lost}); "
             f"driver ready {', '.join(f'{r:.1f}' for r in ready[1:])} ms after respawn; "
             f"ecu-sim reopened after {', '.join(f'{r:.1f}' for r in reopen)} ms; {len(frames)} frames")
@@ -841,17 +855,22 @@ def t_fi_reader_nowake(t, bus):
 
 
 def t_fi_busoff_abort_notick(t, bus):
-    """Bus-off with aborts that take 100 ms, no FI ticker and no traffic: the 20 ms abort bound holds."""
+    """Bus-off with aborts that take 100 ms, no FI ticker and no traffic: the 20 ms abort bound holds.
+    The driver does not wait inside the request; its wait timer ends the abort phase, so nothing but
+    that timer runs the driver between the bus-off and the one xstats read 300 ms later."""
     t.driver(variant=FI, force=True)
     fi(t, 4, 5000, 4)
     t.ssh(f"{TEST} seqsend {TX1} 2E9 16 4 0 >/dev/null")
     x0 = t.xstats()
-    t0 = time.monotonic()
     fi(t, 3, 2, 1)      # bus-off at once, slow aborts, no ticker started
+    time.sleep(0.3)     # no devctl, write or interrupt reaches the driver meanwhile
     x1 = t.xstats()
     check(x0["inflight"] == 4, f"in flight before bus-off: {x0['inflight']}")
-    check(x1["busoff_hold"] == 1 and x1["inflight"] == 0 and x1["tx_abort_forced"] == 4, f"{x1}")
-    return "4 frames stuck aborting dropped and counted at bus-off within the request (tx_abort_forced 4), hold kept"
+    # tx_abort_forced 4 (not 0) shows the timer ended the wait before the 100 ms aborts finished
+    check(x1["busoff_hold"] == 1 and x1["inflight"] == 0 and x1["tx_abort_forced"] == 4
+          and x1["tx_wait"] == 0, f"{x1}")
+    return ("4 frames stuck aborting dropped and counted by the wait timer after 20 ms "
+            "(tx_abort_forced 4, tx_wait 0), hold kept")
 
 
 def t_fi_rejected_normal(t, bus):
@@ -1028,8 +1047,10 @@ def t_fi_quiesce(t, bus):
     fr = bus.recv(1, 3, ids={0x2E2})
     check(x0["inflight"] == 4, f"in flight before restart: {x0['inflight']}")
     check("No error" in out and x1["tx_aborted"] - x0["tx_aborted"] == 4 and x1["restarts"] == 1, f"{out} {x1}")
+    # the restart is deferred, not run inside the request, and canfd-test reports when it is done
+    check("restart deferred until the TXT buffers were done: No error" in out, out.strip())
     check(len(fr) == 1, "TX failed after the restart")
-    return "4 frames in flight -> aborted and counted (tx_aborted +4), restart, TX resumes"
+    return "4 frames in flight -> restart deferred, aborted and counted (tx_aborted +4), restart, TX resumes"
 
 
 def t_fi_reset_retry(t, bus):

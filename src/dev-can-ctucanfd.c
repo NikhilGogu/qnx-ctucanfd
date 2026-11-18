@@ -32,6 +32,7 @@
 #include "ctucanfd_hw.h"
 #include "ctucanfd_devctl.h"
 #include "ctucanfd_time.h"
+#include "ctucanfd_timer.h"
 
 #define DRV_NAME        "dev-can-ctucanfd"
 #define MAX_RX_DEVS     16
@@ -41,6 +42,8 @@
 #define PASS_LIMIT      8u      /* INT_STAT passes per pulse */
 #define REPORT_BUDGET   64u     /* RX mailbox returns to libcan per pulse */
 #define TX_QUIESCE_MS   20u     /* wait for frames in flight, then as long again after an abort */
+#define TX_SLOW_US      3000u   /* a frame this long from set-ready to retired is logged */
+#define SLOW_LOG_MS     100u    /* at most one such line per this many ms */
 #define STUCK_LIMIT     8u      /* pulses in a row a mailbox may be returned without waking anyone */
 #define DUMP_MS         1000u   /* at most one register dump per this many ms */
 
@@ -69,7 +72,15 @@ typedef struct {
     uint32_t mid;
     uint8_t  len;
     bool     ext, rtr, late;
+    uint64_t t_us;      /* set ready, mono_us() */
+    uint64_t final_us;  /* first seen final outside an interrupt pulse, or 0 */
+    uint32_t pulses;    /* x.hw_pulses when set ready */
 } txslot_t;
+
+/* The TX wait (docs/DESIGN.md, section 5): TXT buffers get TX_QUIESCE_MS to
+ * finish, then are aborted and get as long again. It runs as steps on
+ * libcan's thread, never as a sleep there. */
+typedef enum { TXW_IDLE, TXW_FINISH, TXW_ABORT } txw_t;
 
 struct drv {
     /* options */
@@ -104,7 +115,15 @@ struct drv {
     unsigned txb_n;                 /* frames in TXT buffers */
     unsigned tx_rr;
     uint32_t tx_seq;
-    bool     tx_stopped;            /* restart or shutdown in progress */
+    bool     tx_stopped;            /* shutdown in progress */
+    txw_t    txw;                   /* TX wait phase */
+    uint64_t txw_end_ms;            /* end of the phase, now_ms() */
+    bool     restart_pending;       /* SET_TIMING: restart the core when the wait ends */
+    bool     busoff_wait;           /* bus-off: the wait is for the aborts; -a recovers after it */
+    uint64_t last_pulse_us, prev_pulse_us;  /* the last two interrupt pulses, mono_us() */
+    uint64_t slow_log_ms;           /* last slow-TX line, now_ms() */
+    unsigned slow_quiet;            /* slow frames not logged since */
+    uint32_t tx_slow;               /* slow frames in all (ctucan_xstats_t is full: slog2 only) */
 
     /* errors */
     uint32_t fs;                    /* last FAULT_STATE bits */
@@ -151,6 +170,7 @@ static uint64_t now_ms(void)
 }
 
 static void fi_tick(drv_t *d);
+static int restart_now(drv_t *d);
 
 /* ---- transmit ---------------------------------------------------------- */
 
@@ -161,7 +181,7 @@ static unsigned tx_inflight(const drv_t *d)
 
 static bool tx_admit(const drv_t *d)
 {
-    return d->hw_started && !d->tx_stopped && !d->busoff_hold;
+    return d->hw_started && !d->tx_stopped && !d->busoff_hold && d->txw == TXW_IDLE;
 }
 
 static void tx_set_prio(drv_t *d)
@@ -193,6 +213,7 @@ static canmsg_t *tx_dequeue(drv_t *d, mbox_t **from)
 static void tx_kick(drv_t *d)
 {
     unsigned ready = 0;
+    uint64_t t_ready = 0;
 
     while (tx_admit(d) && tx_inflight(d) < d->ntxb) {
         unsigned b = d->txb_head;
@@ -229,6 +250,12 @@ static void tx_kick(drv_t *d)
         s->ext = m.ext.is_extended_mid != 0;
         s->rtr = m.ext.is_remote_frame != 0;
         s->late = false;
+        if (t_ready == 0) {
+            t_ready = mono_us();
+        }
+        s->t_us = t_ready;
+        s->final_us = 0;
+        s->pulses = d->x.hw_pulses;
         d->txb_head = (b + 1) % d->ntxb;
         d->txb_n++;
         d->x.tx_started++;
@@ -252,6 +279,49 @@ static void tx_kick(drv_t *d)
     }
 }
 
+static unsigned tx_queued(const drv_t *d)
+{
+    unsigned n = 0;
+
+    for (unsigned i = 0; i < d->ntx; i++) {
+        n += d->tx[i].cdev.msg_queue->msgcnt;
+    }
+    return n;
+}
+
+/* Diagnostics for a frame that took more than TX_SLOW_US from set-ready to
+ * retired (docs/TESTS.md, restart_under_load). On QEMU a frame is sent when it
+ * is set ready, so the time is mostly the wait for the interrupt pulse that
+ * retires it. The line tells the causes apart: "final seen N us before"
+ * (N > 0) means a client's write found the buffer done while its pulse had
+ * not been handled; "pulses since" (this one included) and "prev gap" (from
+ * the pulse before this one; 0 for none) show whether pulses came at all.
+ * At most one line per SLOW_LOG_MS; "unlogged" counts the ones skipped. */
+static void tx_slow(drv_t *d, unsigned b, unsigned st, uint64_t now)
+{
+    const txslot_t *s = &d->txs[b];
+    uint64_t dt = now - s->t_us;
+    uint64_t ms = now_ms();
+
+    if (dt <= TX_SLOW_US) {
+        return;
+    }
+    d->tx_slow++;
+    if (d->slow_log_ms != 0 && ms - d->slow_log_ms < SLOW_LOG_MS) {
+        d->slow_quiet++;
+        return;
+    }
+    d->slow_log_ms = ms;
+    can_slogf(SLOG2_WARNING, DRV_NAME ": slow TX: frame %u buf %u st %u: %llu us to retire (%s); "
+              "pulses since %u, prev gap %llu us; final seen %llu us before; inflight %u queued %u; "
+              "slow %u unlogged %u", s->seq, b, st, (unsigned long long)dt, d->in_event ? "pulse" : "devctl",
+              d->x.hw_pulses - s->pulses,
+              (unsigned long long)(d->prev_pulse_us != 0 ? d->last_pulse_us - d->prev_pulse_us : 0),
+              (unsigned long long)(s->final_us != 0 ? now - s->final_us : 0),
+              tx_inflight(d), tx_queued(d), d->tx_slow, d->slow_quiet);
+    d->slow_quiet = 0;
+}
+
 /* Retires finished TXT buffers in FIFO order, judged from one TX_STATUS
  * snapshot. At most ntxb (4) buffers, so this needs no budget, and after
  * TXBHCI has been acknowledged no finished buffer is ever left behind. */
@@ -259,6 +329,7 @@ static unsigned tx_retire(drv_t *d)
 {
     uint32_t ts = ctucan_rd(&d->hw, CTUCAN_TX_STATUS);
     unsigned n = 0;
+    uint64_t now = tx_inflight(d) > 0 ? mono_us() : 0;
 
     while (tx_inflight(d) > 0) {
         unsigned b = d->txb_tail;
@@ -296,6 +367,7 @@ static unsigned tx_retire(drv_t *d)
             }
             return n;
         }
+        tx_slow(d, b, st, now);
         d->txb_tail = (b + 1) % d->ntxb;
         d->txb_n--;
         if (d->ntxb > 1) {
@@ -346,37 +418,98 @@ static void tx_force_retire(drv_t *d)
     }
 }
 
-/* Stops TX admission and waits for the TXT buffers to finish: up to `ms` for
- * a normal completion, then an abort and up to `ms` again. Frames that are
- * aborted are dropped and counted; frames still in libcan's queues stay there. */
-static int tx_quiesce(drv_t *d, unsigned ms)
+/* ---- TX wait ---------------------------------------------------------- */
+
+/* Starts a phase of the TX wait, or a new deadline for the current one. TX
+ * admission stays shut until the wait ends. The timer wakes the driver at the
+ * deadline (src/ctucanfd_timer.h) if no interrupt has ended the wait first. */
+static void txw_arm(drv_t *d, txw_t phase)
 {
-    d->tx_stopped = true;
-    for (int phase = 0; phase < 2; phase++) {
-        uint64_t end = now_ms() + ms;
-        for (;;) {
-            fi_tick(d);
-            tx_retire(d);
-            if (tx_inflight(d) == 0) {
-                return EOK;
-            }
-            if (now_ms() >= end) {
-                break;
-            }
-            struct timespec ts = { 0, 200000 };
-            nanosleep(&ts, NULL);
+    d->txw = phase;
+    d->txw_end_ms = now_ms() + TX_QUIESCE_MS;
+    ctucan_timer_arm(d->txw_end_ms);
+}
+
+/* The wait is over: every frame that was in a TXT buffer has finished, was
+ * aborted or was given up. What it was waiting for runs now: a restart that
+ * SET_TIMING asked for, or with -a the recovery request after a bus-off.
+ * During shutdown nothing runs; teardown() stops the core next. */
+static void txw_done(drv_t *d)
+{
+    bool restart = d->restart_pending, busoff = d->busoff_wait;
+
+    d->txw = TXW_IDLE;
+    d->restart_pending = false;
+    d->busoff_wait = false;
+    ctucan_timer_arm(0);
+    if (d->tx_stopped) {
+        return;
+    }
+    if (restart) {
+        /* the reset clears the error counters: no recovery request needed */
+        int rc = restart_now(d);
+        can_slogf(rc == EOK ? SLOG2_INFO : SLOG2_ERROR, DRV_NAME ": deferred restart %s",
+                  rc == EOK ? "done" : "failed, core left stopped");
+    } else if (busoff && d->autobus) {
+        ctucan_wr(&d->hw, CTUCAN_COMMAND, CMD_ERCRST);
+    }
+    tx_kick(d);
+}
+
+/* One step of the TX wait, on libcan's thread or in shutdown. Returns true
+ * when the wait ended in this step. It never sleeps: a phase that is not over
+ * is continued by the next interrupt pulse, client write or devctl, the
+ * timer's CTUCAN_DEVCTL_TIMER among them. Frames that finish are retired as
+ * usual; at the end of the first phase the rest are aborted, and at the end
+ * of the second whatever is still not final is given up (tx_force_retire()). */
+static bool txw_step(drv_t *d)
+{
+    if (d->txw == TXW_IDLE) {
+        return false;
+    }
+    fi_tick(d);
+    tx_retire(d);
+    if (tx_inflight(d) > 0) {
+        if (now_ms() < d->txw_end_ms) {
+            return false;
         }
-        if (phase == 0) {
+        if (d->txw == TXW_FINISH) {
             tx_abort_inflight(d);
+            txw_arm(d, TXW_ABORT);
+            tx_retire(d);
+            if (tx_inflight(d) > 0) {
+                return false;
+            }
+        } else {
+            tx_force_retire(d);
         }
     }
-    tx_force_retire(d);
-    return ETIMEDOUT;
+    txw_done(d);
+    return true;
+}
+
+static void txw_poll(drv_t *d)
+{
+    if (d->txw != TXW_IDLE) {
+        (void)txw_step(d);
+    }
 }
 
 static void cb_transmit(CANDEV *cdev)
 {
-    tx_kick(container_of(cdev, mbox_t, cdev)->drv);
+    drv_t *d = container_of(cdev, mbox_t, cdev)->drv;
+
+    txw_poll(d);
+    if (tx_inflight(d) == d->ntxb && d->txs[d->txb_tail].final_us == 0) {
+        /* Diagnostics only (tx_slow()), and only when every TXT buffer is
+         * busy, so the write has to queue: is the oldest frame done while its
+         * interrupt pulse has not been handled yet? */
+        unsigned st = TXT_STATE(ctucan_rd(&d->hw, CTUCAN_TX_STATUS), d->txb_tail);
+        if (st == TXT_TOK || st == TXT_ERR || st == TXT_ABT || st == TXT_PER) {
+            d->txs[d->txb_tail].final_us = mono_us();
+        }
+    }
+    tx_kick(d);
 }
 
 /* ---- receive ----------------------------------------------------------- */
@@ -449,8 +582,13 @@ static unsigned rx_drain(drv_t *d, unsigned budget)
 /* ---- errors ------------------------------------------------------------ */
 
 /* Bus-off: TX is held and the frames in TXT buffers are aborted. The aborts
- * are waited for here, at most TX_QUIESCE_MS, and whatever is still not final
- * then is given up; nothing relies on later traffic or a timer for that. */
+ * get TX_QUIESCE_MS (the TX wait's abort phase); whatever is still not final
+ * then is given up, and with -a recovery is requested once the wait ends.
+ * This runs inside service(): the step that retires the aborted buffers
+ * comes right after it, in pulse_begin(), and a later one at the latest from
+ * the timer. Nothing relies on later bus traffic. The hold is released only
+ * when FAULT_STATE reads error active (error_event()); TX resumes once the
+ * wait has ended as well. */
 static void enter_busoff(drv_t *d, uint32_t cnt)
 {
     d->stats.bus_off_state_count++;
@@ -458,20 +596,8 @@ static void enter_busoff(drv_t *d, uint32_t cnt)
     can_slogf(SLOG2_WARNING, DRV_NAME ": bus-off (TEC %u REC %u): TX held, %u frame(s) in TXT buffers aborted%s",
               CNT_TEC(cnt), CNT_REC(cnt), tx_inflight(d), d->autobus ? ", recovery requested" : "");
     tx_abort_inflight(d);
-    uint64_t end = now_ms() + TX_QUIESCE_MS;
-    for (;;) {
-        fi_tick(d);
-        tx_retire(d);
-        if (tx_inflight(d) == 0 || now_ms() >= end) {
-            break;
-        }
-        struct timespec ts = { 0, 200000 };
-        nanosleep(&ts, NULL);
-    }
-    tx_force_retire(d);
-    if (d->autobus) {
-        ctucan_wr(&d->hw, CTUCAN_COMMAND, CMD_ERCRST);
-    }
+    d->busoff_wait = true;
+    txw_arm(d, TXW_ABORT);  /* also when a wait was on: its frames are aborted now */
 }
 
 static void error_event(drv_t *d, uint32_t st)
@@ -709,6 +835,7 @@ static void pulse_begin(drv_t *d)
     d->notify_left = false;
     if (d->hw_started) {
         service(d);
+        txw_poll(d);    /* after service(): a restart it ends must not run inside the batch */
     }
     d->reports_left = d->report_budget;
     d->rep_stuck = 0;
@@ -725,6 +852,8 @@ static CANDEV *cb_event(void *const hdl, const int code)
             return NULL;
         }
         d->x.hw_pulses++;
+        d->prev_pulse_us = d->last_pulse_us;
+        d->last_pulse_us = mono_us();
         fi_tick(d);
         pulse_begin(d);
     }
@@ -804,10 +933,11 @@ static void fi_tick(drv_t *d)
 
 /* ---- devctl ------------------------------------------------------------ */
 
-static int restart_controller(drv_t *d)
+/* Stops, resets and starts the core with d->cfg. Called with the TXT buffers
+ * empty (restart_request()), or with frames still in them only when the TX
+ * wait gave those up. */
+static int restart_now(drv_t *d)
 {
-    int rc = d->hw_started ? tx_quiesce(d, TX_QUIESCE_MS) : EOK;
-
     /* the reset empties the RX FIFO: count what it held */
     d->x.rx_flushed += ctucan_hw_rx_frames(&d->hw);
     ctucan_hw_stop(&d->hw);
@@ -826,11 +956,35 @@ static int restart_controller(drv_t *d)
     d->fs = ctucan_rd(&d->hw, CTUCAN_EWL_ERP_FAULT) & FS_MASK;
     d->ewl = (ctucan_rd(&d->hw, CTUCAN_STATUS) & STAT_EWL) != 0;
     d->busoff_hold = false;     /* the reset clears the error counters */
-    d->tx_stopped = false;
     d->hw_started = true;       /* only now: the core is out of reset and set up again */
     d->x.restarts++;
     tx_kick(d);
-    return rc == ETIMEDOUT ? EOK : rc;  /* the restart happened; the timeout is counted */
+    return EOK;
+}
+
+/* A restart for SET_TIMING. With no frame in a TXT buffer it runs now and
+ * the reply says whether the reset worked. Otherwise the frames get the TX
+ * wait first (section 5) and the reply is EOK at once: the restart runs when
+ * the wait ends, the GET_XSTATS state shows it pending until then (bit 11),
+ * and a reset that fails then is counted in restart_fail and logged. A
+ * second SET_TIMING while one is pending changes the timing that restart
+ * uses: the latest wins. */
+static int restart_request(drv_t *d, bool *deferred)
+{
+    *deferred = false;
+    if (d->hw_started) {
+        fi_tick(d);
+        tx_retire(d);
+        if (d->txw != TXW_IDLE || tx_inflight(d) > 0) {
+            d->restart_pending = true;
+            if (d->txw == TXW_IDLE) {
+                txw_arm(d, TXW_FINISH);
+            }
+            *deferred = true;
+            return EOK;
+        }
+    }
+    return restart_now(d);
 }
 
 static int set_timing(drv_t *d, const CAN_DEVCTL_TIMING *t)
@@ -862,9 +1016,11 @@ static int set_timing(drv_t *d, const CAN_DEVCTL_TIMING *t)
     d->cfg.nominal = bt;
     d->cfg.data = data;
     d->bitrate = rate;
-    int rc = restart_controller(d);
+    bool deferred;
+    int rc = restart_request(d, &deferred);
     can_slogf(SLOG2_INFO, DRV_NAME ": timing brp %u ts1 %u ts2 %u sjw %u -> %u bit/s%s", bt.brp, ts1, ts2,
-              bt.sjw, d->bitrate, rc == EOK ? "" : " (restart failed)");
+              bt.sjw, d->bitrate, deferred ? ", restart once the TXT buffers are done" :
+              rc == EOK ? "" : " (restart failed)");
     return rc;
 }
 
@@ -881,8 +1037,9 @@ static void dump_regs(const drv_t *d)
     for (size_t i = 0; i < sizeof(regs) / sizeof(regs[0]); i++) {
         can_slogf(SLOG2_INFO, DRV_NAME ": %-12s 0x%08x", regs[i].name, ctucan_rd(&d->hw, regs[i].off));
     }
-    can_slogf(SLOG2_INFO, DRV_NAME ": pulses %u, deferred %u, unmask_err %u, in flight %u, bus-off hold %d",
-              d->x.hw_pulses, d->x.deferred, d->x.unmask_err, tx_inflight(d), d->busoff_hold);
+    can_slogf(SLOG2_INFO, DRV_NAME ": pulses %u, deferred %u, unmask_err %u, in flight %u, bus-off hold %d, "
+              "TX wait %d, restart pending %d, slow TX %u", d->x.hw_pulses, d->x.deferred, d->x.unmask_err,
+              tx_inflight(d), d->busoff_hold, (int)d->txw, d->restart_pending, d->tx_slow);
 }
 
 static int cb_devctl(CANDEV *cdev, io_devctl_t *msg)
@@ -895,6 +1052,7 @@ static int cb_devctl(CANDEV *cdev, io_devctl_t *msg)
     bool is_rx = cdev->devtype == CANDEV_TYPE_RX;
     int rc;
 
+    txw_poll(d);    /* every devctl continues a TX wait, CTUCAN_DEVCTL_TIMER for that alone */
 #define NEED(n) if (nbytes < (n)) { rc = -EINVAL; break; }
     switch (msg->i.dcmd) {
     case CAN_DEVCTL_GET_MID:
@@ -999,7 +1157,8 @@ static int cb_devctl(CANDEV *cdev, io_devctl_t *msg)
         rc = is_rx ? -ENOTSUP : -EINVAL;
         break;
     case CTUCAN_DEVCTL_GET_XSTATS:
-        d->x.state = d->fs | (d->busoff_hold ? 1u << 9 : 0) | (d->ewl ? 1u << 8 : 0) | (tx_inflight(d) & 0xffu);
+        d->x.state = d->fs | (d->restart_pending ? 1u << 11 : 0) | (d->txw != TXW_IDLE ? 1u << 10 : 0) |
+                     (d->busoff_hold ? 1u << 9 : 0) | (d->ewl ? 1u << 8 : 0) | (tx_inflight(d) & 0xffu);
 #ifdef CTUCAN_FI
         d->x.state |= (ctucan_fi_state(d->hw.fi) & 0xffu) << 24;
 #endif
@@ -1016,6 +1175,10 @@ static int cb_devctl(CANDEV *cdev, io_devctl_t *msg)
             ctucan_wr(&d->hw, CTUCAN_COMMAND, CMD_ERCRST);
             can_slogf(SLOG2_WARNING, DRV_NAME ": bus-off recovery requested");
         }
+        rc = EOK;
+        break;
+    case CTUCAN_DEVCTL_TIMER:
+        /* from the timer's helper thread; the wait was continued above */
         rc = EOK;
         break;
 #ifdef CTUCAN_FI
@@ -1276,11 +1439,33 @@ static int attach_irq(drv_t *d)
     return EOK;
 }
 
+/* Waits for the TXT buffers at shutdown: the same TX wait as on libcan's
+ * thread, with the same end result (frames finish, are aborted or are given
+ * up), and a wait already on keeps its phase. This one may sleep, and it is
+ * the only sleep in the driver: it runs after can_resmgr_start() has
+ * returned, off libcan's loop, when no client is served any more, and it is
+ * bounded by two phases of TX_QUIESCE_MS. A pending restart or recovery
+ * request is dropped: the core is stopped next. */
+static void tx_shutdown_wait(drv_t *d)
+{
+    d->tx_stopped = true;
+    d->restart_pending = false;
+    d->busoff_wait = false;
+    if (d->txw == TXW_IDLE) {
+        txw_arm(d, TXW_FINISH);
+    }
+    while (!txw_step(d)) {
+        struct timespec ts = { 0, 200000 };
+        nanosleep(&ts, NULL);
+    }
+}
+
 /* Undoes whatever main() got done, in reverse order. */
 static void teardown(drv_t *d)
 {
+    ctucan_timer_fini();    /* nothing serves CTUCAN_DEVCTL_TIMER any more */
     if (d->hw_started) {
-        tx_quiesce(d, TX_QUIESCE_MS);
+        tx_shutdown_wait(d);
     }
     if (d->map != NULL) {
         ctucan_hw_stop(&d->hw);     /* also after a failed restart: leave the core off the bus */
@@ -1321,9 +1506,18 @@ int main(int argc, char *argv[])
     if ((rc = parse_args(d, argc, argv)) != EOK) {
         return rc;
     }
+    /* First, while this is the only thread and nothing is attached or mapped:
+     * the wait timer forks its helper process here (src/ctucanfd_timer.c). */
+    char tpath[32];
+    snprintf(tpath, sizeof(tpath), "/dev/can%u/rx0", d->unit);
+    if ((rc = ctucan_timer_init(tpath, CTUCAN_DEVCTL_TIMER)) != EOK) {
+        fprintf(stderr, DRV_NAME ": TX wait timer: %s\n", strerror(rc));
+        return rc;
+    }
     /* PCI configuration access needs I/O privileges (ThreadCtl(), QNX 8.0 library reference) */
     if (ThreadCtl(_NTO_TCTL_IO_LEVEL, (void *)(uintptr_t)_NTO_IO_LEVEL_1) == -1) {
         fprintf(stderr, DRV_NAME ": ThreadCtl(_NTO_TCTL_IO_LEVEL): %s\n", strerror(errno));
+        ctucan_timer_fini();
         return EPERM;
     }
     if ((rc = pci_open(d)) != EOK) {
