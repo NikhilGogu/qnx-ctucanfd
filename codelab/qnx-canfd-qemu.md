@@ -34,7 +34,7 @@ QEMU can emulate a CAN FD board: `ctucan_pci` is a PCI board with the CTU CAN FD
 
 **What you will learn about QNX:** a CAN driver on QNX is an ordinary process. libcan makes it a resource manager: applications open `/dev/can1/rx0` and `/dev/can1/tx1` and read and write frames with `devctl()`. When the driver dies, the kernel, the applications and your shell keep running, the process manager tells a supervisor, and the supervisor starts the driver again.
 
-The outputs shown are from runs on Ubuntu 22.04 with QNX SDP 8.0 and QEMU 6.2, trimmed: long lines end in `...`, and paths in your home directory start with `~`. Your addresses, process ids and times will differ. QEMU models no CAN bit timing, so the times you see are how fast QEMU and QNX move frames on your machine.
+The outputs shown are from runs on Ubuntu 22.04 with QNX SDP 8.0 and QEMU 6.2, trimmed: long lines end in `...`, and paths in your home directory start with `~`. Target timings omitted. Run the example locally for full output. Your addresses, process ids and times will differ. QEMU models no CAN bit timing, so the times you see are how fast QEMU and QNX move frames on your machine.
 
 ---
 
@@ -189,7 +189,7 @@ started pid 531331 with ctucan_pci on canbus0 <-> vcan0
 QNX noname 8.0.0 2026/06/05-16:26:03EDT x86pc x86_64
 ```
 
-The `until` loop tries again every 2 seconds until the target answers on SSH; with KVM that took about 15 seconds in our runs. Now copy the programs to the target and look at the board from QNX:
+The `until` loop tries again every 2 seconds until the target answers on SSH. Now copy the programs to the target and look at the board from QNX:
 
 ```bash
 put $NODE1 $(find build/x86_64 -type f)
@@ -279,7 +279,7 @@ Terminal 2 shows both frames as they reach `vcan0`:
 
 ```text
  (000.000000)  vcan0  TX B -  123  [64]  00 01 02 03 04 05 06 07 08 09 ... 3D 3E 3F
- (000.134120)  vcan0  TX - -  321   [8]  11 22 33 44 55 66 77 88
+ (...)  vcan0  TX - -  321   [8]  11 22 33 44 55 66 77 88
 ```
 
 `[64]` is the length, and the `B` says the frame was sent with bit rate switch, so it is a CAN FD frame. candump marks every frame `TX` because on `vcan0` every frame comes from a program on your machine: here QEMU's bridge, later also `cansend`. The driver sends every frame longer than 8 bytes as CAN FD with bit rate switch. `canfd-test` used `CAN_DEVCTL_WRITE_CANMSG_EXT`, the libcan devctl that carries the full 64-byte payload.
@@ -294,8 +294,8 @@ wait
 ```
 
 ```text
-/dev/can1/rx0  456  [16]  C0 C1 C2 C3 C4 C5 C6 C7 C8 C9 CA CB CC CD CE CF  ts=16199300
-/dev/can1/rx0  1ABCDEF0  [04]  DE AD BE EF  ts=16199857
+/dev/can1/rx0  456  [16]  C0 C1 C2 C3 C4 C5 C6 C7 C8 C9 CA CB CC CD CE CF  ts=...
+/dev/can1/rx0  1ABCDEF0  [04]  DE AD BE EF  ts=...
 ```
 
 In `cansend`, `##1` marks a CAN FD frame with bit rate switch, and an identifier with more than three hex digits is a 29-bit one. `ts` is the time the driver took the frame from the core, in microseconds. If a frame arrives before the reader opens the device, the driver keeps it in the device's queue (64 frames deep), so the reader still gets it.
@@ -346,13 +346,13 @@ candump -t d -n 5 vcan0,18F:7FF
 
 ```text
  (000.000000)  vcan0  18F  [64]  0D 00 00 00 8C 00 00 00 34 0E 85 FF 50 61 ... 00 10
- (000.010106)  vcan0  18F  [64]  0E 00 00 00 96 00 00 00 2E 0E 86 FF 50 61 ... 00 98
- (000.010167)  vcan0  18F  [64]  0F 00 00 00 A0 00 00 00 2F 0E 87 FF 50 61 ... 00 1D
- (000.010071)  vcan0  18F  [64]  10 00 00 00 AA 00 00 00 30 0E 88 FF 50 61 ... 00 55
- (000.010116)  vcan0  18F  [64]  11 00 00 00 B4 00 00 00 31 0E 89 FF 50 61 ... 00 CA
+ (...)  vcan0  18F  [64]  0E 00 00 00 96 00 00 00 2E 0E 86 FF 50 61 ... 00 98
+ (...)  vcan0  18F  [64]  0F 00 00 00 A0 00 00 00 2F 0E 87 FF 50 61 ... 00 1D
+ (...)  vcan0  18F  [64]  10 00 00 00 AA 00 00 00 30 0E 88 FF 50 61 ... 00 55
+ (...)  vcan0  18F  [64]  11 00 00 00 B4 00 00 00 31 0E 89 FF 50 61 ... 00 CA
 ```
 
-Bytes 0 to 3 are a sequence number (little endian), bytes 4 to 7 the milliseconds since start, then pack voltage, current, state of charge (`0x50`, 80 %), 16 cell voltages, and in byte 63 a CRC-8 over the other 63 bytes, so a receiver can check every frame. The filter `18F:7FF` makes candump show only id `0x18F`.
+Bytes 0 to 3 are a sequence number (little endian), bytes 4 to 7 the time since start, then pack voltage, current, state of charge (`0x50`, 80 %), 16 cell voltages, and in byte 63 a CRC-8 over the other 63 bytes, so a receiver can check every frame. The filter `18F:7FF` makes candump show only id `0x18F`.
 
 Now ask the ECU for its battery's remaining life, OBD-II service 01, PID `0x5B`. Start candump for the request and the answer, then send the request from Linux:
 
@@ -365,12 +365,12 @@ wait
 
 ```text
  (000.000000)  vcan0  7DF   [8]  02 01 5B 00 00 00 00 00
- (000.001216)  vcan0  7E8   [8]  03 41 5B CC 00 00 00 00
+ (...)  vcan0  7E8   [8]  03 41 5B CC 00 00 00 00
 ```
 
-`7E8` is the answer of the first ECU: 3 bytes follow, `41` is service 01's positive response, `5B` the PID, and `CC` (204) is the value, 204 / 255 = 80 %. The answer left QNX about a millisecond after the request entered `vcan0`, through QEMU, the driver, ecu-sim and back.
+`7E8` is the answer of the first ECU: 3 bytes follow, `41` is service 01's positive response, `5B` the PID, and `CC` (204) is the value, 204 / 255 = 80 %. The answer went through QEMU, the driver, ecu-sim and back. Timings in the capture are omitted. Run the example locally for full output.
 
-Check: the deltas between telemetry frames are close to `0.010000`, and `7E8` answered `7DF`.
+Check: the sequence number in bytes 0 to 3 counts up by one from frame to frame, and `7E8` answered `7DF`.
 
 ---
 
@@ -389,7 +389,7 @@ on $NODE1 cat /tmp/sup.log
 ```text
 dev-can-ctucanfd: B0:D5:F0 BAR1 0xfeb90000 core 0 of 2, irq 10
 dev-can-ctucanfd: CTU CAN FD 2.2, /dev/can1/rx0..rx0 tx1..tx1, CAN FD, ...
-1793742630.252176 ctucan-supervisor: driver pid 1073172 ready (/dev/can1/tx1 answers GET_INFO) 7.5 ms after spawn
+... ctucan-supervisor: driver pid 1073172 ready (/dev/can1/tx1 answers GET_INFO)
 ```
 
 `slay` sent SIGTERM, and the driver stopped cleanly. ecu-sim kept running: its writes failed, and it tries to open its devices again every millisecond until a driver is back.
@@ -407,10 +407,10 @@ awk '{ t = substr($1, 2, 17); if (p) { d = (t - p) * 1000; if (d > max) max = d 
 ```
 
 ```text
-409 frames, largest gap 20.3 ms
+Target timings omitted. Run the example locally for full output.
 ```
 
-`candump -L` writes one line per frame with an absolute timestamp, and the `awk` script prints the largest time between two frames. In this run the telemetry paused for one period: the frame due while no driver was there was skipped, and the sequence number in bytes 0 to 3 jumps by two. What happened in between:
+`candump -L` writes one line per frame with an absolute timestamp, and the `awk` script prints the largest time between two frames. In the run shown, the telemetry paused for one period: the frame due while no driver was there was skipped, and the sequence number in bytes 0 to 3 jumps by two. What happened in between:
 
 ```bash
 on $NODE1 cat /tmp/sup.log
@@ -419,18 +419,18 @@ on $NODE1 cat /tmp/ecu.log
 
 ```text
 ...
-1793742633.485323 ctucan-supervisor: driver pid 1073172 died 3.241 s after spawn
+... ctucan-supervisor: driver pid 1073172 died
 dev-can-ctucanfd: B0:D5:F0 BAR1 0xfeb90000 core 0 of 2, irq 10
 dev-can-ctucanfd: CTU CAN FD 2.2, /dev/can1/rx0..rx0 tx1..tx1, CAN FD, ...
-1793742633.490920 ctucan-supervisor: driver pid 1163284 ready (/dev/can1/tx1 answers GET_INFO) 5.6 ms after spawn
+... ctucan-supervisor: driver pid 1163284 ready (/dev/can1/tx1 answers GET_INFO)
 ecu-sim: telemetry id 18F every 10000 us on /dev/can1/tx1, diagnostics and echo (1E0 -> 1E8) on /dev/can1/rx0
-ecu-sim: telemetry reopened /dev/can1/tx1 after 136.3 ms
-ecu-sim: diag rx reopened /dev/can1/rx0 after 137.9 ms
-ecu-sim: diag rx reopened /dev/can1/rx0 after 7.3 ms
-ecu-sim: telemetry reopened /dev/can1/tx1 after 0.0 ms
+ecu-sim: telemetry reopened /dev/can1/tx1 after ... ms
+ecu-sim: diag rx reopened /dev/can1/rx0 after ... ms
+ecu-sim: diag rx reopened /dev/can1/rx0 after ... ms
+ecu-sim: telemetry reopened /dev/can1/tx1 after ... ms
 ```
 
-The new driver was ready 5.6 ms after the supervisor started it. The first two ecu-sim lines are from the `slay` before: ecu-sim waited about 137 ms, until the supervisor's first driver was up. After the kill, its receive thread was back 7.3 ms after its first failed read, and its telemetry thread found the new driver at its next send. The kernel freed everything the dead driver held: its memory, its interrupt attachment and its connection to the PCI server. The new driver reset the CAN core when it started. Your shell, the SSH sessions and ecu-sim kept running throughout.
+The new driver was ready after the supervisor started it. The first two ecu-sim lines are from the `slay` before: ecu-sim waited until the supervisor's first driver was up. After the kill, its receive thread came back after its first failed read, and its telemetry thread found the new driver at its next send. The kernel freed everything the dead driver held: its memory, its interrupt attachment and its connection to the PCI server. The new driver reset the CAN core when it started. Your shell, the SSH sessions and ecu-sim kept running throughout.
 
 Check: `sup.log` shows `died` followed by `ready`.
 
@@ -478,10 +478,8 @@ on $NODE2 /tmp/canfd-test tester /dev/can1/rx0 /dev/can1/tx1 10
 ```text
 tester: telemetry 18F: 1095 frames, seq 2454..3548
 tester: telemetry 18F: missing 0, out_of_order 0, bad_crc 0, bad_len 0
-tester: telemetry 18F: period at this driver mean 10.000 ms, min 9.120, max 10.877
 tester: echo 1E0->1E8: 1000 sent, 1000 answered, lost 0, bad 0, duplicate 0
-tester: echo 1E0->1E8: round trip ms min 2.910, p50 3.769, p99 4.531, max 4.778
-tester: diag 7DF->7E8: 10 sent, 10 answered, round trip ms min 3.896, max 4.152
+tester: diag 7DF->7E8: 10 sent, 10 answered
 tester: unexpected 0, other 0, tx error 0
 tester: PASS
 ```
@@ -489,15 +487,15 @@ tester: PASS
 Terminal 2 shows the requests from node 2 and the answers from node 1, both 64-byte CAN FD frames with bit rate switch:
 
 ```text
- (000.008292)  vcan0  TX B -  1E0  [64]  E7 03 00 00 EB EC ED EE EF F0 F1 F2 F3 F4 ...
- (000.001853)  vcan0  TX B -  1E8  [64]  E7 03 00 00 EB EC ED EE EF F0 F1 F2 F3 F4 ...
+ (...)  vcan0  TX B -  1E0  [64]  E7 03 00 00 EB EC ED EE EF F0 F1 F2 F3 F4 ...
+ (...)  vcan0  TX B -  1E8  [64]  E7 03 00 00 EB EC ED EE EF F0 F1 F2 F3 F4 ...
 ```
 
-What the tester measured:
+What the tester checked:
 
-* Telemetry from node 1 to node 2: every frame in the range arrived, in order, with a correct CRC. The range starts before the tester did: the first frames it read had waited in node 2's receive queue, which keeps the newest 64. The period, measured with the timestamps node 2's driver gave the frames, is the 10 ms that ecu-sim keeps on node 1.
-* Echo from node 2 to node 1 and back: every request was answered with the same 64 bytes. The round trip is measured on node 2's clock alone, so the two virtual machines' clocks need not agree. In candump each answer follows its request after about 1.7 ms (1.4 to 3 ms in our runs): that part of the round trip is node 1 (its QEMU, driver and ecu-sim); the rest is node 2's own way out and back in.
-* All of these times are QEMU timing on your machine.
+* Telemetry from node 1 to node 2: every frame in the range arrived, in order, with a correct CRC. The range starts before the tester did: the first frames it read had waited in node 2's receive queue, which keeps the newest 64.
+* Echo from node 2 to node 1 and back: every request was answered with the same 64 bytes. The round trip is timed on node 2's clock alone, so the two virtual machines' clocks need not agree. In candump each answer follows its request: that part of the round trip is node 1 (its QEMU, driver and ecu-sim); the rest is node 2's own way out and back in. The times are omitted here. Run the example locally for full output.
+* Any times you see are QEMU timing on your machine.
 
 Stop `candump` in terminal 2 with Ctrl+C.
 
