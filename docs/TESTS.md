@@ -1,19 +1,19 @@
-# Tests and measurements
+# Tests and results
 
-What the end-to-end suite checks and what was measured, moved here from the README. Every result line is in [test-results.txt](test-results.txt); how the driver works is in [DESIGN.md](DESIGN.md). Times measured on the host are QEMU timing on `vcan0`.
+What the end-to-end suite checks and what it found, moved here from the README. Result lines are in [test-results.txt](test-results.txt); how the driver works is in [DESIGN.md](DESIGN.md). Target timings omitted. Run the example locally for full output. Anything timed on this setup is QEMU timing on `vcan0`, not bus timing.
 
-## Restart gaps
+## Restart under the supervisor
 
-`ctucan-supervisor` starts the driver again when it dies. Telemetry gaps measured on the host's `vcan0` after `slay -s KILL dev-can-ctucanfd` in QEMU:
+`ctucan-supervisor` starts the driver again when it dies. After `slay -s KILL dev-can-ctucanfd` in QEMU the host's `candump` on `vcan0` shows telemetry resuming:
 
-- ecu-sim telemetry every 1 ms, the host sending 500 frames/s into QNX, three kills (test `restart_under_load`): 9.0, 6.5 and 8.4 ms.
-- ecu-sim telemetry every 10 ms, no other traffic, one kill (codelab step 9): 20.3 ms in the run the codelab shows and 19.8 ms in its last dry run; the one frame due while no driver ran was skipped.
+- ecu-sim telemetry every 1 ms, the host sending 500 frames/s into QNX, three kills (test `restart_under_load`): telemetry resumed after each kill.
+- ecu-sim telemetry every 10 ms, no other traffic, one kill (codelab step 9): telemetry resumed; the one frame due while no driver ran was skipped, so the sequence number jumps by two.
 
-## Two QNX nodes, measured
+## Two QNX nodes
 
-The setup is in the README. This is what the tester measured.
+The setup is in the README. This is what the tester counted.
 
-The tester checks every telemetry frame from node 1 (length, CRC-8, sequence), sends a 64-byte CAN FD echo request on 0x1E0 every 10 ms, which ecu-sim sends back unchanged on 0x1E8, and times each round trip on its own clock; once a second it sends the diagnostic request. Measured (`two_nodes`, 30 s, `docs/test-results.txt`): 3094 of 3094 telemetry frames on node 2 with sequence and CRC clean, also on `vcan0`; 3000 of 3000 echo round trips with every byte checked on node 2 and on `vcan0`, round trip on node 2's clock min 2.751 ms, median 3.271, 99th percentile 3.681, max 4.162; of that, node 1 between request and reply on `vcan0` median 1.700 ms, 99th percentile 1.998; 30 of 30 diagnostic requests answered.
+The tester checks every telemetry frame from node 1 (length, CRC-8, sequence), sends a 64-byte CAN FD echo request on 0x1E0 every 10 ms, which ecu-sim sends back unchanged on 0x1E8, and times each round trip on its own clock; once a second it sends the diagnostic request. Result (`two_nodes`, 30 s, `docs/test-results.txt`): 3094 of 3094 telemetry frames on node 2 with sequence and CRC clean, also on `vcan0`; 3000 of 3000 echo round trips with every byte checked on node 2 and on `vcan0`; 30 of 30 diagnostic requests answered. The round-trip times are omitted. Run the example locally for full output.
 
 ## Host unit tests
 
@@ -73,7 +73,7 @@ Results with clang, ASan and UBSan:
 
 ### Every order of TX wait events (`test_txw_orders`)
 
-`tests/host/test_txw_orders.c` runs every sequence of 4 events from a 12-event alphabet against the TX wait (DESIGN.md section 5). There is no randomness: all 12^4 sequences run from each of 15 start states, 311,040 runs in all, about 20 s with the sanitizers on a laptop. Each run starts the driver afresh.
+`tests/host/test_txw_orders.c` runs every sequence of 4 events from a 12-event alphabet against the TX wait (DESIGN.md section 5). There is no randomness: all 12^4 sequences run from each of 15 start states, 311,040 runs in all. Each run starts the driver afresh.
 
 - Alphabet: the core sends its highest-priority ready buffer (SEND); an interrupt pulse (PULSE); aborts in progress finish (ABTDONE); a client write (WRITE); a plain devctl (DEVCTL); `SET_TIMING` (TIMING); bus-off with its pulse (BUSOFF); error active with its pulse (RECOVER); 5 or 20 ms with the wait timer firing on time (ADV5, ADV20); 25 ms with the timer's helper late (LATE25); the late timer firing (FIRE).
 - Start states: 1, 2 or 3 frames in flight, or 4 in flight and 2 queued; FINISH with a restart pending; ABORT with aborts stuck; ABORT after bus-off, with and without `-a`. Each comes with aborts that finish at once and with aborts that finish only on ABTDONE, so a run without ABTDONE has aborts that never finish. The ABORT-after-restart state has stuck aborts only.
@@ -92,13 +92,13 @@ Target tests for properties that need the driver's design, run on their own: `sc
 
 AWS run 2, QNX 8.0 in QEMU, 3 rounds each, interleaved:
 
-| Driver | `freeze_free` | Longest answer during bus-off / restart | `kill_storm` |
-|---|---|---|---|
-| main 30fff05 | fail 3/3: bound kept by waiting in the request | 19.8 to 20.7 ms | pass 3/3 |
-| TX wait with a timer thread | fail 3/3: bound missed with no traffic | 0.65 to 0.96 ms | pass 3/3 |
-| this tree (timer helper process) | pass 3/3 | 0.69 to 0.96 ms | pass 3/3, no helper left behind |
+| Driver | `freeze_free` | `kill_storm` |
+|---|---|---|
+| main 30fff05 | fail 3/3: bound kept by waiting in the request | pass 3/3 |
+| an earlier version of this tree, with a timer thread (history, since replaced by the helper process) | fail 3/3: bound missed with no traffic | pass 3/3 |
+| this tree (timer helper process) | pass 3/3 | pass 3/3, no helper left behind |
 
-Idle, the longest answer was 0.15 to 0.30 ms on all three.
+The longest answers are omitted. Run the example locally for full output.
 
 `rx_loss`, AWS run 3, QNX 8.0 in QEMU, 5 rounds each, interleaved. Frames lost by the plain restart (control) and by the restart with 4 stuck frames; in brackets, how many of those the reset flushed from the RX FIFO:
 
@@ -110,13 +110,34 @@ Idle, the longest answer was 0.15 to 0.30 ms on all three.
 
 FIFO overflows were 0 in every run. Main waits 20 ms inside the request with the FIFO unread, and the reset then flushes what came in. In this tree the reset flushed nothing; the one frame lost in round 4 was not in the FIFO, so it came while the core was off the bus. That round fails the rule because its control lost none.
 
-`kill_storm`, AWS run 3, 3 rounds each, interleaved: main 30fff05 pass 3/3, this tree pass 3/3. One earlier run of 0110e39 failed the count: 64 gaps over 5 ms for 60 kills, the 4 extra ones 5.2 to 6.8 ms long. Main showed 2 such extra gaps in another run. A 5 ms threshold sits close to what host load alone can cause. About half the gaps are near 60 ms on every driver: kills come 0.5 s apart, and the supervisor waits 50 ms before it restarts a driver that died less than 1 s after its start. With kills 1.2 s apart the supervisor added no delay, and the gaps at the kills were 5.3 to 12.2 ms on both drivers.
+`kill_storm`, AWS run 3, 3 rounds each, interleaved: main 30fff05 pass 3/3, this tree pass 3/3. One earlier run of 0110e39 failed the count: 64 gaps over 5 ms for 60 kills, so 4 extra. Main showed 2 such extra gaps in another run. A 5 ms threshold sits close to what host load alone can cause. About half the gaps are long on every driver: kills come 0.5 s apart, and the supervisor waits 50 ms before it restarts a driver that died less than 1 s after its start. With kills 1.2 s apart the supervisor added no delay.
 
 ## The suite and its results
 
 `scripts/test-suite.sh tc vcan0 [tc2]` builds both variants and runs `scripts/gate-test.sh` and every test in `scripts/tests/ctutest.py` against the QEMU target, keeping the output in `build/test-results-*.txt`. With a second target on the same interface (`tc2`) it also runs the two-node test; without one that test is skipped. The scripts reach the target through `scripts/qtarget-lite.sh NAME ssh|put`, which finds the target in `~/targets/NAME` (or in `$TARGETS/NAME` when `TARGETS` is set) with `mkqnximage --getip`; set `QTARGET` to use another helper with the same commands. With `JUNIT=FILE` the suite also writes JUnit XML, one test case per test, with pass, fail and skip and no times (`ctutest.py --junit`). `scripts/tests/test_junit.py` checks that writer and that the run order lists every test once; the `checks` workflow runs it. `.github/workflows/qemu-e2e.yml` runs the whole suite on a self-hosted runner labelled `qnx-sdp` and `kvm`, started by hand; it keeps the log and the JUnit file only when asked, because the log holds QEMU timing figures. The host side uses a raw SocketCAN socket and `candump -L`, and checks complete frames: identifier, format, length, every payload byte including padding, and sequence numbers.
 
-Results of the run recorded in `docs/test-results.txt` (commit c9c7745, from a clean clone with `QTARGET=scripts/qtarget-lite.sh`, two QNX 8.0 x86_64 targets under QEMU 6.2 with KVM): the gate test and 41 of 41 tests passed, two-node test included, and every binary copied to the target was checked by md5. The driver has changed since that commit, and the suite now has 43 tests. The suite then ran five times on two targets with the code of commit 3dfda81, the merge of the held branches. The gate test passed in all five runs, and 43 of 43 tests passed in four of them. In the third run `restart_under_load` failed. Besides the three gaps from the kills, the host saw one more telemetry gap over the 5 ms limit, before the first kill. main does the same on this host: run alone, the test failed 1 of 12 times on main and 1 of 12 times on 3dfda81, then passed 20 of 20 times on 3dfda81. So the extra gap does not come from the merged changes. Where that frame was held up is not known yet. These runs are not in `docs/test-results.txt`.
+Results by driver commit. The 41-test record and the runs on 3dfda81 are history. They are not the status of the latest commit. The suite has 43 tests today, plus the gate test.
+
+| Driver commit | Suite size | Runs | Result |
+|---|---|---|---|
+| c9c7745 | 41 tests | 1, two QNX 8.0 x86_64 targets under QEMU 6.2 with KVM, from a clean clone with `QTARGET=scripts/qtarget-lite.sh` (recorded in `docs/test-results.txt`) | gate test and 41 of 41 tests passed, two-node test included; every binary copied to the target was checked by md5 |
+| 3dfda81 (the merge of the held branches) | 43 tests | 5, two targets | gate test passed in all 5; 43 of 43 tests passed in 4; in the third run `restart_under_load` failed |
+
+The runs on 3dfda81 are not in `docs/test-results.txt`. In the failed run, besides the three gaps from the kills, the host saw one more telemetry gap over the 5 ms limit, before the first kill. Main does the same on this host: run alone, the test failed 1 of 12 times on main and 1 of 12 times on 3dfda81, then passed 20 of 20 times on 3dfda81. So the extra gap does not come from the merged changes. The cause was not traced. The later runs on QNX 8.0 are in the next section.
+
+### Results on QNX 8.0, by driver commit
+
+Counts only. Each full run is `scripts/test-suite.sh a vcan0 b` on two QNX 8.0 x86_64 targets under QEMU with KVM. A full run prints 44 PASS lines: the gate test and the 43 tests of `scripts/tests/ctutest.py`, whose own summary reads "43 of 43 passed". Older notes in the team's records call this "44 tests". The 41-test run recorded in `docs/test-results.txt` has the same shape: the gate test and 41 tests. `rx_loss` is in `scripts/tests/signature.py` and runs on its own, so it is not part of the 44. The records are in the team's results folder, which is not public; the paths are given as text.
+
+| Driver | Full runs | Result | Record |
+|---|---|---|---|
+| main 30fff05 | 5 | 44/44 in 5 of 5 | results/ctucanfd-run2-report.md, results/aws-run-2/can2/can-main-*.txt |
+| the helper-process fix, PR #7 | 5 | 44/44 in 5 of 5; after each run the five timer-dependent tests ran 10 times each: 250/250 | results/ctucanfd-run2-report.md, results/aws-run-2/can3/ |
+| PR #8 (RX drain) | 3 | 44/44 in 3 of 3 | results/aws-run-3/can/drain/ |
+
+That is 13 runs, all passing. The timer-thread version of the fix, tried before the helper process, showed 43 of 44 PASS lines in each of 5 runs: `fi_busoff_abort_notick` failed each time because the thread could not reach the driver's own device. It is history.
+
+`kill_storm`: 60 SIGKILLs, three times per driver, under load. Every driver passed all three. After every kill the supervisor had a ready driver, the number of driver processes after the run matched the number before, and none was left dead (results/aws-run-2/sig/, results/aws-run-3/can/storm3/).
 
 `restart_under_load` diagnostics. The checks are unchanged; when the gap count is wrong, the failure message adds each gap's start relative to the nearest kill (and how long that kill's ssh took), the driver's `slow TX` slog2 lines, and ecu-sim's `overrun` and `EAGAIN` lines (at most 32 per run). Hypotheses, most likely first, and how to read the lines:
 
@@ -127,11 +148,11 @@ Results of the run recorded in `docs/test-results.txt` (commit c9c7745, from a c
 - Every length from 0 to 64 from QNX to the host, and every classic and CAN FD length to QNX, checked byte for byte including padding; remote frames both ways; 11-bit and 29-bit ids both ways, including 29-bit ids whose low 18 bits are zero.
 - Four blocked readers on one mailbox: each of 200 frames reached exactly one reader and all four finished. Four writers at once: 4 x 100 frames, each stream in order. With no reader, the 64-frame mailbox queue kept the newest 64 of 100 frames.
 - 2000 frames of 64 bytes each way at the same time, 2 ms apart: both streams complete and in order.
-- Bounded interrupt service: 300 frames in bursts of 90 arrived in order in 7 interrupt pulses of at most 64 frames, and a client's devctls were answered 757 times while frames were still coming; at that load the longest took 32533 us, and 2636 us with 4-frame batches. A pulse that arrives while the core is stopped after a failed reset is unmasked with the core's interrupt output left off (1 pulse, then none in the next second), and a mailbox whose wake-ups fail is retried for 8 pulses and then dropped and counted.
+- Bounded interrupt service: 300 frames in bursts of 90 arrived in order in 7 interrupt pulses of at most 64 frames, and a client's devctls were answered 757 times while frames were still coming; with 4-frame batches the client was answered 200 times in 23 pulses. A pulse that arrives while the core is stopped after a failed reset is unmasked with the core's interrupt output left off (1 pulse, then none in the next second), and a mailbox whose wake-ups fail is retried for 8 pulses and then dropped and counted.
 - TX order across four TXT buffers: 2000/2000 in order with no pacing. With completions held back by the fault injector, 1000/1000 in order across 249 TX commands that readied several buffers at once; the same run with the first version's fixed priorities broke order 996 times (negative control).
-- Restart under load, 1 ms workload (`restart_under_load`): ecu-sim telemetry on 0x2F8 every 1 ms, the host sending 500 frames/s of 64 bytes into QNX, three `slay -s KILL dev-can-ctucanfd` 2 s apart with the supervisor: telemetry gaps of 9.0, 6.5 and 8.4 ms in candump timestamps (8, 7 and 8 periods lost); the driver was ready 6.2, 7.8 and 6.4 ms after the supervisor started it.
+- Restart under load, 1 ms workload (`restart_under_load`): ecu-sim telemetry on 0x2F8 every 1 ms, the host sending 500 frames/s of 64 bytes into QNX, three `slay -s KILL dev-can-ctucanfd` 2 s apart with the supervisor: telemetry resumed after each kill.
 - Supervisor: it kills and restarts a driver that does not become ready, takes a driver as ready only when the process it started serves the path, abandons a readiness probe that a server never answers, and counts spawn failures.
-- ecu-sim for 30 s at its 10 ms period: 3032 frames, CRC and sequence clean; period in QEMU timestamps on vcan0 mean 10.000 ms, standard deviation 0.049 ms, 1st and 99th percentile 9.870 and 10.131 ms. The diagnostic request was answered 1.1 ms after it was sent.
+- ecu-sim for 30 s at its 10 ms period: 3032 frames, CRC and sequence clean; the diagnostic request was answered with the right reply.
 - Two QNX nodes: see the section above.
 - Fault injection: warning limit up and down, error passive, bus-off with automatic recovery (300/300 frames in order), bus-off whose FAULT_STATE reads none and then passive before active (TX stayed held until active), bus-off with manual recovery (no frame left while bus-off, the writer got EAGAIN, all 100 queued frames left in order afterwards), aborts that do not finish in time, also with no traffic and no ticker (dropped and counted by the driver's wait timer 20 ms after bus-off, TX resumed), a `SET_TIMING` restart deferred until the TXT buffers are done (`fi_quiesce`), late TX completions with one RX frame per pulse (none lost), a restart whose reset times out followed by one that works, a corrupt RX format word among payloads that look like format words (no frame fabricated), and state cleared by scenario OFF and by a reset. The fault injector changes only what the driver sees; QEMU sends each frame when it is set ready (docs/DESIGN.md, section 8).
 - Timestamps: the 32-bit value wraps at 2^32 us and the 64-bit devctl keeps counting with the same low 32 bits (`timestamp64`). Frames are counted by format both ways and the counts match what the host sent and saw (`fd_flag_counts`).
