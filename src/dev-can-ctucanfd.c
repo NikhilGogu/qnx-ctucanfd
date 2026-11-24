@@ -210,20 +210,28 @@ static void integ_hold_end(drv_t *d, const char *how)
     can_slogf(SLOG2_INFO, DRV_NAME ": core error active (%s): TX released", how);
 }
 
+#define FS_UNREAD 0xffffffffu   /* integ_hold_poll() did not read FAULT_STATE */
+
 /* The way out for a core that raises no FCSI when integration ends: where TX
  * would be admitted, FAULT_STATE is read once and the hold ends if it reads
- * error active. d->fs follows, so the next real change is seen as one. */
-static void integ_hold_poll(drv_t *d)
+ * error active. d->fs follows, so the next real change is seen as one.
+ * Returns the FAULT_STATE bits it read, or FS_UNREAD, so tx_kick() reads
+ * the register once and not twice. */
+static uint32_t integ_hold_poll(drv_t *d)
 {
-    if (d->integ_hold && d->hw_started && !d->tx_stopped && !d->busoff_hold && d->txw == TXW_IDLE) {
-        uint32_t fs = ctucan_rd(&d->hw, CTUCAN_EWL_ERP_FAULT) & FS_MASK;
+    uint32_t fs = FS_UNREAD;
 
+    if (d->integ_hold && d->hw_started && !d->tx_stopped && !d->busoff_hold && d->txw == TXW_IDLE) {
+        fs = ctucan_rd(&d->hw, CTUCAN_EWL_ERP_FAULT) & FS_MASK;
         if (fs & FS_ERA) {
             d->fs = fs;
             integ_hold_end(d, "polled");
         }
     }
+    return fs;
 }
+
+static unsigned tx_queued(const drv_t *d);
 
 static void tx_set_prio(drv_t *d)
 {
@@ -251,12 +259,30 @@ static canmsg_t *tx_dequeue(drv_t *d, mbox_t **from)
     return NULL;
 }
 
+/* Before a Set ready command FAULT_STATE is read once. A core that reads
+ * bus-off gets no frame in this kick: they stay queued in libcan, and
+ * d->fs, busoff_hold and the counters are left alone, so the FCSI that
+ * follows is still seen as the change and error_event() does all the usual
+ * bus-off work. This closes the case where TXBHCI or a client write is
+ * handled before that FCSI. An idle kick (TX not admitted, nothing queued or
+ * no free buffer) reads nothing. A reading without bus-off, QEMU 6.2's 0
+ * among them, changes nothing. Only the few register accesses between this
+ * read and the command remain, and no driver can close those. */
 static void tx_kick(drv_t *d)
 {
     unsigned ready = 0;
     uint64_t t_ready = 0;
+    uint32_t fs = integ_hold_poll(d);
 
-    integ_hold_poll(d);
+    if (!tx_admit(d) || tx_inflight(d) >= d->ntxb || tx_queued(d) == 0) {
+        return;
+    }
+    if (fs == FS_UNREAD) {
+        fs = ctucan_rd(&d->hw, CTUCAN_EWL_ERP_FAULT) & FS_MASK;
+    }
+    if (fs & FS_BOF) {
+        return;
+    }
     while (tx_admit(d) && tx_inflight(d) < d->ntxb) {
         unsigned b = d->txb_head;
         if (!ctucan_txt_writable(ctucan_hw_txt_state(&d->hw, b))) {
