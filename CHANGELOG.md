@@ -4,6 +4,11 @@ This file starts with the changes after commit 30fff05; earlier history is in `g
 
 ## Unreleased
 
+### Fixed
+
+- Start and stop wrote MODE and SETTINGS as a whole word built from zero. On a core that has them, this cleared MODE.RXBAM (RX buffer automatic mode) and SETTINGS.TBFBO (TXT buffers go to "TX failed" at bus-off), whose reset value is 1. Now the word is read first and only the driver's own bits change (`src/ctucanfd_hw.c`; datasheet 3.1.3, 3.1.4). QEMU 6.2 ignores both bits, so no earlier test showed it. `tests/host/test_mode_rmw.c` checks it. Not run on a core that has the bits.
+- After ENA the core is bus-off while it integrates, and with TBFBO = 1 a Set ready command in that time moves the TXT buffer to "Aborted" (datasheet 2.9.7, note). The driver now holds TX after start-up and after every restart when FAULT_STATE reads bus-off, and releases it at FCSI with error active or by one read of FAULT_STATE where TX would be admitted. It is kept apart from the bus-off hold and is not counted as a recovery. `GET_XSTATS` state bit 12 shows it. A reading of none, as QEMU 6.2 gives, or of error passive sets no hold. Checked only on the host fake core (`tests/host/test_integ_hold.c`): QEMU 6.2 has no integration phase. The fake core now reads FAULT_STATE as 0 after a reset, as QEMU does. Still open: a TXBHCI serviced before the FCSI that shows bus-off can set a buffer Ready at bus-off (`docs/DESIGN.md`, section 8). Also the comment at `case TXT_ERR:` now names all three causes of "TX failed".
+
 ### Changed
 
 - libcan's thread no longer sleeps. The TX wait before a `SET_TIMING` restart and after bus-off is a state machine continued by interrupt pulses, devctls, writes and a one-shot CLOCK_MONOTONIC timer. The timer's pulse goes to a helper process the driver forks at start (`src/ctucanfd_timer.c`), which sends the new `CTUCAN_DEVCTL_TIMER` to `/dev/canU/rx0`; a helper thread cannot, since a process cannot open the paths its own libcan serves (`docs/DESIGN.md`, section 5).

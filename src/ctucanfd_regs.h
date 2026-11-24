@@ -68,6 +68,24 @@
 #define SET_NISOFD      (1u << 23)  /* non-ISO (Bosch) CAN FD CRC */
 #define SET_PEX         (1u << 24)
 
+/* Bits whose reset value is 1 and that the driver does not own. They must
+ * survive every write of MODE/SETTINGS, so the driver reads the word first and
+ * changes only the bits it owns. Positions: datasheet v2.7 3.1.3 and 3.1.4,
+ * and REG_MODE_RXBAM / REG_MODE_TBFBO in Linux ctucanfd_kregs.h. SETTINGS sits
+ * at +16 in the word. */
+#define MODE_RXBAM      (1u << 9)   /* RX buffer automatic mode, reset 1 (3.1.3, 2.10). Off:
+                                     * reading RX_DATA does not move the read pointer, and
+                                     * only COMMAND[RXRPMV] does, which the driver never writes */
+#define SET_TBFBO       (1u << 25)  /* SETTINGS[9]: TXT buffers go to "TX failed" at bus-off,
+                                     * reset 1 (3.1.4, 2.9.6) */
+
+/* The bits ctucan_hw_start() sets or clears from its configuration. All the
+ * others in MODE/SETTINGS keep the value the core has (3.1.3, 3.1.4). */
+#define MODE_OWNED_MASK (MODE_FDE | MODE_BMM)
+#define SET_OWNED_MASK  (SET_RTRLE | (SET_RTRTH_MAX << SET_RTRTH_SHIFT) | SET_ILBP | \
+                         SET_ENA | SET_NISOFD)
+#define CTUCAN_MODE_OWNED (MODE_OWNED_MASK | SET_OWNED_MASK)
+
 /* STATUS */
 #define STAT_RXNE       (1u << 0)
 #define STAT_DOR        (1u << 1)

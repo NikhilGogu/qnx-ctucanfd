@@ -6,6 +6,8 @@
 #include "fake_core.h"
 
 fake_core_t fake;
+bool fake_integrate;
+uint32_t fake_fault_reset;
 
 static unsigned rx_len[FAKE_RX_WORDS];     /* words of each frame in the FIFO, oldest first */
 static unsigned rx_nlen, rx_left;          /* frames queued; words left of the frame being read */
@@ -15,8 +17,9 @@ static unsigned nposted;
 static void fake_reset(void)
 {
     memset(fake.mem, 0, sizeof(fake.mem));
-    fake.mem[CTUCAN_MODE / 4] = MODE_FDE;  /* reset value QEMU 6.2 shows (docs/DESIGN.md, section 1) */
-    fake.mem[CTUCAN_EWL_ERP_FAULT / 4] = FS_ERA | 96u;  /* error active, warning limit 96 */
+    fake.mem[CTUCAN_MODE / 4] = fake.mode_reset;
+    /* default 0, as QEMU 6.2 reads it: none of active, passive, bus-off (docs/DESIGN.md section 1) */
+    fake.mem[CTUCAN_EWL_ERP_FAULT / 4] = fake_fault_reset;
     fake.rx_head = fake.rx_used = fake.rx_frames = 0;
     rx_nlen = rx_left = 0;
     for (unsigned b = 0; b < CTUCAN_TXT_BUFFERS; b++) {
@@ -29,6 +32,10 @@ void fake_init(ctucan_hw_t *hw)
 {
     memset(&fake, 0, sizeof(fake));
     nposted = 0;
+    fake.mode_reset = MODE_FDE;  /* reset value QEMU 6.2 shows (docs/DESIGN.md, section 1) */
+    if (fake_integrate) {
+        fake.mode_reset |= SET_TBFBO;   /* the datasheet reset value of that bit */
+    }
     fake_reset();
     fake.device_id = 0x0202u << 16 | CTUCAN_ID_VALUE;   /* version 2.2 */
     hw->base = (volatile uint8_t *)fake.mem;
@@ -149,6 +156,9 @@ static void apply_wr(uint32_t off, uint32_t val)
         if ((val & MODE_RST) && !fake.reset_stuck) {
             fake_reset();
         } else {
+            if (fake_integrate && (val & SET_ENA) && !(fake.mem[off / 4] & SET_ENA)) {
+                fake.mem[CTUCAN_EWL_ERP_FAULT / 4] = FS_BOF | 96u;  /* integrating: bus-off until a test ends it */
+            }
             fake.mem[off / 4] = val;
         }
         break;
@@ -172,7 +182,10 @@ static void apply_wr(uint32_t off, uint32_t val)
                 continue;
             }
             if ((val & TXC_TXCR) && ctucan_txt_writable(fake.txt[b])) {
-                fake.txt[b] = TXT_RDY;
+                /* datasheet 2.9.7, note: with TBFBO = 1 a Set ready while bus-off goes to Aborted at once (the
+                 * datasheet states it for integration; this model does it at every bus-off) */
+                bool bof = (fake.mem[CTUCAN_EWL_ERP_FAULT / 4] & FS_BOF) != 0;
+                fake.txt[b] = fake_integrate && bof && (fake.mem[CTUCAN_MODE / 4] & SET_TBFBO) ? TXT_ABT : TXT_RDY;
             } else if ((val & TXC_TXCA) && (fake.txt[b] == TXT_RDY || fake.txt[b] == TXT_TRAN)) {
                 fake.txt[b] = fake.abort_slow ? TXT_ABTP : TXT_ABT;
             } else if (val & TXC_TXCE) {

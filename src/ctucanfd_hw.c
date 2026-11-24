@@ -67,7 +67,7 @@ int ctucan_hw_reset(const ctucan_hw_t *hw)
 
 void ctucan_hw_start(const ctucan_hw_t *hw, const ctucan_hw_cfg_t *cfg, uint32_t int_ena)
 {
-    uint32_t mode = 0;
+    uint32_t mode = 0;      /* the bits the driver owns */
 
     ctucan_wr(hw, CTUCAN_INT_ENA_CLR, INT_ALL);
     /* Sources the driver does not service never latch in INT_STAT. */
@@ -96,16 +96,22 @@ void ctucan_hw_start(const ctucan_hw_t *hw, const ctucan_hw_cfg_t *cfg, uint32_t
     }
     /* Mode and settings are written while the core is still off the bus, and
      * only a second write sets ENA, so the core never joins the bus with a
-     * configuration it has not taken yet. */
-    ctucan_wr(hw, CTUCAN_MODE, mode);
-    ctucan_wr(hw, CTUCAN_MODE, mode | SET_ENA);
+     * configuration it has not taken yet. The word is read first: RXBAM and
+     * TBFBO reset to 1, and a write built from zero would clear them (RX
+     * would stay in manual mode and the TXT buffers would not fail at
+     * bus-off). Only the owned bits change. */
+    uint32_t cur = ctucan_rd(hw, CTUCAN_MODE) & ~(CTUCAN_MODE_OWNED | MODE_RST);
+
+    ctucan_wr(hw, CTUCAN_MODE, cur | mode);
+    ctucan_wr(hw, CTUCAN_MODE, cur | mode | SET_ENA);
     ctucan_wr(hw, CTUCAN_INT_ENA_SET, int_ena);
 }
 
 void ctucan_hw_stop(const ctucan_hw_t *hw)
 {
     ctucan_wr(hw, CTUCAN_INT_ENA_CLR, INT_ALL);
-    ctucan_wr(hw, CTUCAN_MODE, 0);      /* SETTINGS.ENA = 0: the core leaves the bus */
+    /* SETTINGS.ENA = 0: the core leaves the bus. The other bits stay as they are. */
+    ctucan_wr(hw, CTUCAN_MODE, ctucan_rd(hw, CTUCAN_MODE) & ~(SET_ENA | MODE_RST));
     ctucan_wr(hw, CTUCAN_INT_STAT, INT_ALL);
 }
 

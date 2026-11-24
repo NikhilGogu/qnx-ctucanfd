@@ -48,6 +48,7 @@ typedef struct {
     uint32_t tx_abort_forced;   /* buffers given up because they did not finish or abort in time */
     uint32_t state;             /* [31:28] FI scenario, [27:24] FI step, [18:16] FAULT_STATE,
                                  * bit 11 SET_TIMING restart pending, bit 10 TX wait pending,
+                                 * bit 12 integration hold (TX held until error active after ENA),
                                  * bit 9 bus-off hold, bit 8 STATUS.EWL, [7:0] frames in flight */
 } ctucan_xstats_t;
 

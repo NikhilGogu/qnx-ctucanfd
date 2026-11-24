@@ -13,7 +13,7 @@ SAN     ?= -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-fram
 HW      := $(SRC)/ctucanfd_hw.c fake_core.c
 HDRS    := $(SRC)/ctucanfd_hw.h $(SRC)/ctucanfd_regs.h $(SRC)/ctucanfd_time.h fake_core.h check.h $(wildcard shim/*.h shim/*/*.h)
 DRV     := $(SRC)/dev-can-ctucanfd.c $(SRC)/ctucanfd_devctl.h $(SRC)/ctucanfd_timer.h fake_libcan.c fake_libcan.h
-TESTS   := test_dlc_timing test_frames test_core test_time test_driver test_fi test_txw_orders test_no_sleep test_rx_restart test_supervisor
+TESTS   := test_dlc_timing test_frames test_core test_mode_rmw test_time test_driver test_fi test_txw_orders test_no_sleep test_rx_restart test_integ_hold test_supervisor
 
 all: $(addprefix $(BUILD)/,$(TESTS))
 
@@ -38,6 +38,9 @@ $(BUILD)/test_no_sleep: test_no_sleep.c $(HW) $(HDRS) $(DRV) driver_harness.h | 
 $(BUILD)/test_rx_restart: test_rx_restart.c $(HW) $(HDRS) $(DRV) driver_harness.h | $(BUILD)
 	$(CC) $(CFLAGS) $(SAN) -o $@ $< $(HW) fake_libcan.c
 
+$(BUILD)/test_integ_hold: test_integ_hold.c $(HW) $(HDRS) $(DRV) driver_harness.h | $(BUILD)
+	$(CC) $(CFLAGS) $(SAN) -o $@ $< $(HW) fake_libcan.c
+
 # The same tests against another tree's driver, for comparison:
 #   make no_sleep_base BASE=/path/to/other/src
 #   make rx_restart_base BASE=/path/to/other/src
@@ -46,6 +49,12 @@ no_sleep_base: test_no_sleep.c $(HW) $(HDRS) $(DRV) driver_harness.h | $(BUILD)
 	test -f $(BASE)/dev-can-ctucanfd.c
 	$(CC) -I$(BASE) $(CFLAGS) $(SAN) -o $(BUILD)/test_no_sleep_base $< $(HW) fake_libcan.c
 	./$(BUILD)/test_no_sleep_base
+
+# test_integ_hold.c against a driver without the integration hold: it must fail
+integ_hold_base: test_integ_hold.c $(HW) $(HDRS) $(DRV) driver_harness.h | $(BUILD)
+	test -f $(BASE)/dev-can-ctucanfd.c
+	$(CC) -I$(BASE) -DBASE_DRIVER $(CFLAGS) $(SAN) -o $(BUILD)/test_integ_hold_base $< $(HW) fake_libcan.c
+	./$(BUILD)/test_integ_hold_base
 
 rx_restart_base: test_rx_restart.c $(HW) $(HDRS) $(DRV) driver_harness.h | $(BUILD)
 	test -f $(BASE)/dev-can-ctucanfd.c
@@ -67,4 +76,4 @@ run: all
 clean:
 	rm -rf $(BUILD)
 
-.PHONY: all run clean no_sleep_base rx_restart_base
+.PHONY: all run clean no_sleep_base rx_restart_base integ_hold_base

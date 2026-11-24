@@ -649,7 +649,7 @@ static void body_devctl(void)
     CHECK_EQ(dc(RX0, CAN_DEVCTL_DEBUG_INFO, NULL, 0, 0), 0);
     CHECK_EQ(lc.slog_lines - lines, dump);
     CHECK_EQ(dc(RX0, CAN_DEVCTL_ERROR, &d, 0, sizeof(d.error)), sizeof(d.error));
-    CHECK_EQ(d.error.drvr1 & FS_MASK, FS_ERA);
+    CHECK_EQ(d.error.drvr1 & FS_MASK, 0);    /* the fake core reads FAULT_STATE 0, as QEMU 6.2 does */
     CHECK(dc(RX0, CTUCAN_DEVCTL_FI, &fi, sizeof(fi), 0) == -1 && errno == ENOTSUP, "FI on a normal build");
     CHECK(dc(RX0, CTUCAN_DEVCTL_FI_TICK, NULL, 0, 0) == -1 && errno == ENOTSUP, "FI_TICK on a normal build");
     CHECK(dc(RX0, __DION(_DCMD_MISC, 99), NULL, 0, 0) == -1 && errno == ENOTSUP, "unknown command");
