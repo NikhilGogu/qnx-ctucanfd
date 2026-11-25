@@ -106,13 +106,13 @@ static int parse_id(const char *s, CAN_MSG *m)
     memcpy(digits, s, n);
     digits[n] = '\0';
     unsigned long id = strtoul(digits, &end, 16);
-    if (*end != '\0') {
-        return EINVAL;
+    if (*end != '\0' || id > 0x1fffffffu) {
+        return EINVAL;      /* no extended id has more than 29 bits */
     }
     if (id > 0x7ff) {
         ext = 1;
     }
-    m->mid = ext ? (uint32_t)(id & 0x1fffffffu) : (uint32_t)((id & 0x7ffu) << 18);
+    m->mid = ext ? (uint32_t)id : (uint32_t)((id & 0x7ffu) << 18);
     m->ext.is_extended_mid = (uint32_t)ext;
     return EOK;
 }

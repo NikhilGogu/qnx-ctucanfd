@@ -12,8 +12,13 @@
 #include <unistd.h>
 #include "check.h"
 
+/* write(2) on the device: the test chooses what it returns */
+static ssize_t test_write(int fd, const void *buf, size_t n);
+
 #define main tool_main
+#define write test_write
 #include "../../tools/canfd-test.c"
+#undef write
 #undef main
 
 int MsgSendPulse(int coid, int priority, int code, int value)
@@ -30,7 +35,18 @@ static struct {
     uint32_t state_after_set;       /* state word seen after SET_TIMING */
     int      set_timing_rc;
     unsigned set_timing_calls;
+    unsigned frames_written;        /* WRITE_CANMSG_EXT calls */
+    int      stats_rc, error_rc;    /* GET_STATS and ERROR replies */
+    ssize_t  write_ret;             /* test_write() result; -1 sets errno to write_errno */
+    int      write_errno;
 } fk;
+
+static ssize_t test_write(int fd, const void *buf, size_t n)
+{
+    (void)fd; (void)buf; (void)n;
+    errno = fk.write_errno;
+    return fk.write_ret;
+}
 
 int devctl(int fd, int dcmd, void *data, size_t nbytes, int *info)
 {
@@ -54,6 +70,18 @@ int devctl(int fd, int dcmd, void *data, size_t nbytes, int *info)
     }
     if (dcmd == CAN_DEVCTL_GET_STATS) {
         memset(data, 0, sizeof(CAN_DEVCTL_STATS));
+        return fk.stats_rc;
+    }
+    if (dcmd == CAN_DEVCTL_ERROR) {
+        memset(data, 0, sizeof(struct can_devctl_error));
+        return fk.error_rc;
+    }
+    if (dcmd == CAN_DEVCTL_GET_INFO) {
+        memset(data, 0, sizeof(CAN_DEVCTL_INFO));
+        return EOK;
+    }
+    if (dcmd == CAN_DEVCTL_WRITE_CANMSG_EXT) {
+        fk.frames_written++;
         return EOK;
     }
     return ENOTTY;
@@ -121,9 +149,27 @@ static void test_monitor_no_sample(void)
     CHECK_EQ(run_tool(4, argv1), 0);
 }
 
+/* identifiers: an id the frame cannot hold must not be cut to a different one */
+static void test_send_id(void)
+{
+    char *over[] = { "canfd-test", "send", "/dev/null", "20000000", "1", NULL };
+    char *over_x[] = { "canfd-test", "send", "/dev/null", "ffffffffx", "1", NULL };
+    char *top[] = { "canfd-test", "send", "/dev/null", "1fffffff", "1", NULL };
+    char *std[] = { "canfd-test", "send", "/dev/null", "7ff", "1", NULL };
+
+    memset(&fk, 0, sizeof(fk));
+    CHECK(run_tool(5, over) != 0, "id 0x20000000 was accepted");
+    CHECK(run_tool(5, over_x) != 0, "id 0xffffffff with the extended flag was accepted");
+    CHECK_EQ(fk.frames_written, 0);
+    CHECK_EQ(run_tool(5, top), 0);
+    CHECK_EQ(run_tool(5, std), 0);
+    CHECK_EQ(fk.frames_written, 2);
+}
+
 int main(void)
 {
     test_timing_reports_failed_restart();
     test_monitor_no_sample();
+    test_send_id();
     return check_exit("test_canfd_tool");
 }
