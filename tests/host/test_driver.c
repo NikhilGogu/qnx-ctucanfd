@@ -143,6 +143,7 @@ static void body_tx_wrap(void)
      * first set fills every buffer, the queue fills behind it, and the refill
      * after they finish goes past the end of the ring in one tx_kick(). */
     g_drv.txb_head = g_drv.txb_tail = g_drv.ntxb - 1;
+    tx_set_prio(&g_drv);    /* the priorities the driver holds for a ring that starts there */
     wrap_nsent = 0;
     for (unsigned round = 0; round < 4 * total && wrap_nsent < total; round++) {
         while (written < total && lc.dev[TX1]->msg_queue->msgcnt < g_drv.ntxb) {
@@ -150,23 +151,25 @@ static void body_tx_wrap(void)
             CHECK_EQ(fake_write(TX1, &m), 0);
             written++;
         }
-        /* the core sends the ready buffers oldest first */
-        unsigned rdy[CTUCAN_TXT_BUFFERS], n = 0;
-        for (unsigned b = 0; b < CTUCAN_TXT_BUFFERS; b++) {
-            if (fake.txt[b] == TXT_RDY) {
-                rdy[n++] = b;
+        /* the core sends the ready buffer with the highest priority in TX_PRIORITY, the lower buffer
+         * number first among equals (the same rule as test_txw_orders.c): the order comes from what
+         * the driver programmed, not from the ids the test chose */
+        uint32_t prio = fake.mem[CTUCAN_TX_PRIORITY / 4];
+        for (;;) {
+            int best = -1;
+            unsigned best_p = 0;
+            for (unsigned b = 0; b < CTUCAN_TXT_BUFFERS; b++) {
+                unsigned p = (prio >> (4u * b)) & 7u;
+                if (fake.txt[b] == TXT_RDY && (best < 0 || p > best_p)) {
+                    best = (int)b;
+                    best_p = p;
+                }
             }
-        }
-        for (unsigned i = 1; i < n; i++) {
-            for (unsigned j = i; j > 0 && txt_id(rdy[j]) < txt_id(rdy[j - 1]); j--) {
-                unsigned t = rdy[j];
-                rdy[j] = rdy[j - 1];
-                rdy[j - 1] = t;
+            if (best < 0 || wrap_nsent >= 64) {
+                break;
             }
-        }
-        for (unsigned i = 0; i < n && wrap_nsent < 64; i++) {
-            wrap_sent[wrap_nsent++] = txt_id(rdy[i]);
-            fake.txt[rdy[i]] = TXT_TOK;
+            wrap_sent[wrap_nsent++] = txt_id((unsigned)best);
+            fake.txt[best] = TXT_TOK;
         }
         irq(INT_TXBHCI);
         fake_pulse();
