@@ -64,6 +64,10 @@ extern bool fake_integrate;
  * (docs/DESIGN.md, section 1). A test may set FS_ERA | 96 or FS_ERP | 96 before it starts the driver. */
 extern uint32_t fake_fault_reset;
 
+/* What DEVICE_ID reads after fake_init(), when not 0: a test sets it before it starts the driver to put
+ * something that is not a CTU CAN FD core behind the BAR. Kept by fake_init(), like fake_integrate. */
+extern uint32_t fake_device_id_force;
+
 /* Power-on state: reset values, empty FIFO, four empty TXT buffers. */
 void fake_init(ctucan_hw_t *hw);
 

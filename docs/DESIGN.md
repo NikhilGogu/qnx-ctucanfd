@@ -45,7 +45,7 @@ What the QEMU 6.2 model leaves out or does differently (from reading `hw/net/can
 | EWL_ERP_FAULT, REC_TEC and ERR_CAPT read 0 | FAULT_STATE reads "none of active, passive, bus-off"; the driver treats that as not bus-off |
 | Writes narrower than 32 bits are not shifted into place | All register access is 32-bit, 16-bit fields go through their word |
 | Both cores drive one `qemu_irq`; each core raises or lowers it alone | Use one core per board for interrupt-driven nodes; a second node gets a second board |
-| No bus timing: frames from the host land in the FIFO as fast as the host sends | Unpaced bursts overflow the FIFO after 102 frames of 64 bytes |
+| No bus timing: frames from the host land in the FIFO as fast as the host sends | The FIFO has 0x800 words and a 64-byte frame takes 20, so unpaced bursts overflow it after 102 frames of 64 bytes |
 | No acceptance filters: the filter registers are neither stored nor read back, `FILTER_STATUS` reads 0 | Software filtering only (section 4.1) |
 
 ## 2. Driver architecture on the CAN DDK
@@ -110,8 +110,8 @@ Work that is left over stays visible to the core as a pending interrupt status b
 
 Results on tc (`docs/test-results.txt`). Target timings omitted. Run the example locally for full output.
 
-- `burst_batches`: 300 host frames of 64 bytes in bursts of 90 (more than one batch): all 300 reached the reader in order in 7 interrupt pulses, 3 of which left work for the next one; largest batch 64 frames. A client issuing `CAN_DEVCTL_GET_STATS` back to back got 757 answers while frames were still coming in. The longest devctl time is omitted.
-- `fi_batches`: the same with the batch forced down to 4 frames: 90/90 frames in order in 23 pulses, `unmask_err` 0, 200 devctl answers while frames were coming. The longest devctl time is omitted.
+- `burst_batches`: 300 host frames of 64 bytes in bursts of 90 (more than one batch): all 300 reached the reader in order, at least one pulse left work for the next one, `unmask_err` stayed 0, and a client issuing `CAN_DEVCTL_GET_STATS` back to back was answered while frames were still coming in. The pulse count, the largest batch and the number of answers differ from run to run, so they are not stated here. The longest devctl time is omitted.
+- `fi_batches`: the same with the batch forced down to 4 frames: 90 of 90 frames in order, no pulse took more than 4 frames, `unmask_err` 0, and devctls were answered while frames were coming. The longest devctl time is omitted.
 - `fi_reader_budget`: one mailbox return per pulse and readers blocked on four mailboxes: every reader finished, with 30 pulses holding RBNEI for readers. An earlier version of this test put all four readers on one mailbox: there was one interrupt pulse and one mailbox return, and all four readers got their 10 frames, so one return can wake several readers of a mailbox. The test therefore spreads the readers over four mailboxes, where each return wakes only that mailbox's readers.
 
 libcan's thread takes pulses and client messages in priority order (MsgReceive), so a sustained stream of interrupts at a priority above the clients' can keep a client waiting for longer (section 11).
@@ -162,7 +162,7 @@ Slow TX diagnostics: a TXT buffer that takes more than 3 ms from being set ready
 
 Tests (`scripts/tests/ctutest.py`, numbers from `docs/test-results.txt`):
 
-- `tx_order`: one writer with no pacing, 2000 frames: all 2000 reached vcan0 in order. In QEMU a TXT buffer completes inside the TX_COMMAND write, so the driver rarely has several frames ready at once (max in flight 3, 0 multi-buffer commands in that run).
+- `tx_order`: one writer with no pacing, 2000 frames: all 2000 reached vcan0 in order. In QEMU a TXT buffer completes inside the TX_COMMAND write, so the driver rarely has several frames ready at once (the test checks order and `tx_order_err` 0; how many buffers were in flight differs from run to run).
 - `fi_tx_order`: the fault-injection build holds each completion until a 4 ms grid point at least 5 ms later and releases at most three per millisecond, oldest first, so the driver refills several buffers in one command at changing ring positions: 1000/1000 frames in order across 249 multi-buffer TX commands, max 4 in flight, `tx_order_err 0`. QEMU sent each frame when it was set ready, so this checks the order the driver sets buffers ready and the priorities QEMU applies to buffers ready together.
 - `fi_tx_order_fixed`: the same run with the first version's fixed priorities (buffer n gets n + 1) as a negative control: 996 order breaks in 1000 frames.
 
@@ -272,6 +272,7 @@ The codelab (`codelab/qnx-canfd-qemu.md`) walks through the same setup by hand.
 - With frames in TXT buffers, `SET_TIMING` replies EOK before the restart has run; the restart's result is visible only through `GET_XSTATS` (state bit 11, `restart_fail`) and slog2 (section 5).
 - The 32-bit frame timestamp wraps every 2^32 us, about 71.6 minutes (section 4); `CTUCAN_DEVCTL_GET_TIMESTAMP64` does not wrap.
 - Any client that can open any mailbox can restart the controller (`SET_TIMING`), move the time base (`SET_TIMESTAMP`) and end a held bus-off (`CTUCAN_DEVCTL_RECOVER`); libcan gives the driver no caller identity, and the open mode does not limit devctls, so the node mode and group are the only guard (section 7.1).
+- A restart inside an interrupt pulse can leave RX readers blocked. The restart drains the FIFO into the mailbox queues and the reset clears RBNEI, so if more reader returns are due than the report budget of 64, the driver waits for an interrupt that does not come, and the readers beyond the budget stay blocked until the next frame arrives. A host test with the budget set to 1 reproduces it; the QNX tests do not reach it.
 - Devctl latency has no upper bound: a sustained interrupt load at a priority above the clients' can delay them (section 3.2).
 
 ## 12. Defects found and fixed

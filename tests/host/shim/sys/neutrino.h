@@ -43,6 +43,7 @@ int ThreadCtl(int cmd, void *data);
 int ChannelCreate(unsigned flags);
 int ConnectAttach(uint32_t nd, pid_t pid, int chid, unsigned index, int flags);
 int ConnectServerInfo(pid_t pid, int coid, struct _server_info *info);
+int MsgSendPulse(int coid, int priority, int code, int value);
 int MsgRegisterEvent(struct sigevent *ev, int coid);
 int MsgReceivePulse(int chid, void *pulse, size_t bytes, void *info);
 int TimerTimeout(clockid_t id, int flags, const struct sigevent *notify, const uint64_t *ntime, uint64_t *otime);

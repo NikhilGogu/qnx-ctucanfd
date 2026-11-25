@@ -269,7 +269,7 @@ def main():
     TESTS["rx_loss"] = lambda t, bus: t_rx_loss(t, bus, a.rate)
     t, bus = c.Target(a.target), c.Bus(a.ifname)
     failed = 0
-    for n in a.tests or list(TESTS):
+    for n in dict.fromkeys(a.tests or list(TESTS)):     # a case named twice runs once
         t0 = time.monotonic()
         try:
             print(f"PASS {n}: {TESTS[n](t, bus)} ({time.monotonic() - t0:.1f} s)", flush=True)

@@ -37,6 +37,8 @@ make -C tests/host run          # SAN= to build without the sanitizers
 | `test_no_sleep` | No sleep on libcan's thread: a `SET_TIMING` restart, a bus-off and a bus-off with `-a`, each with 4 frames whose aborts never finish, while a client asks for statistics. The fake libcan counts every `nanosleep()` made inside the driver's callbacks (event handler, transmit, devctl); the count must be 0, and all 4 frames must be given up. Also builds against an older driver (see below) |
 | `test_rx_restart` | No RX frame lost to a restart: 10 frames in the RX FIFO and 10 blocked readers before a `SET_TIMING` restart with nothing in flight, before one deferred behind 4 frames whose aborts never finish, and during a bus-off with `-a` and the same 4 frames. No pulse runs until the restart is over. All 10 frames must reach the readers in order and the reset must flush none. Also builds against an older driver (see below) |
 | `test_supervisor` | `tools/ctucan-supervisor.c` with its spawn and sleep replaced: a SIGTERM during the restart delay starts no driver |
+| `test_canfd_tool` | `tools/canfd-test.c` with `devctl()` and `write()` answered by a script: `timing` reports a restart that failed or stays pending, also when the first stats read failed; `monitor` with no sample, ids above 29 bits, short writes, failing `info` queries, `seqsend` lengths with no DLC, an empty `tester` run and the timing numbers are refused or reported |
+| `test_ecu_sim` | `tools/ecu-sim.c`: the period `-p` and the id `-i` must be whole numbers in range; a zero period and an id above 0x7ff are refused |
 
 The fake core models only what the code relies on, as `src/ctucanfd_regs.h` and `docs/DESIGN.md` describe it. It is not a model of the silicon or of QEMU. The driver runs on a virtual clock (`fake_clock_gettime()`, `fake_nanosleep()`), and the fake wait timer (`ctucan_timer_*` in `tests/host/fake_libcan.c`) records each arm and, when a test fires it, sends `CTUCAN_DEVCTL_TIMER` to the device path the driver gave it, as the helper process does on QNX. The tests check that libcan's thread never sleeps: the virtual sleep total stays 0 except in shutdown. The fake libcan follows the DDK text quoted in DESIGN.md section 3.1: the event handler is called until it returns NULL, and each returned RX mailbox wakes one blocked reader. It says nothing about how libcan schedules pulses against clients. The headers in `tests/host/shim/` define the QNX names the driver uses so it builds without the SDP; they are our own stand-ins, written from how this repository uses the names, not QNX's headers. Real interrupts, the PCI server and libcan itself are covered only by the end-to-end suite below.
 
@@ -129,17 +131,17 @@ The runs on 3dfda81 are not in `docs/test-results.txt`. In the failed run, besid
 
 ### Results on QNX 8.0, by driver commit
 
-Counts only. Each full run is `scripts/test-suite.sh a vcan0 b` on two QNX 8.0 x86_64 targets under QEMU with KVM. A full run prints 44 PASS lines: the gate test and the 43 tests of `scripts/tests/ctutest.py`, whose own summary reads "43 of 43 passed". Older notes in the team's records call this "44 tests". The 41-test run recorded in `docs/test-results.txt` has the same shape: the gate test and 41 tests. `rx_loss` is in `scripts/tests/signature.py` and runs on its own, so it is not part of the 44. The records are in the team's results folder, which is not public; the paths are given as text.
+Counts only. Each full run is `scripts/test-suite.sh a vcan0 b` on two QNX 8.0 x86_64 targets under QEMU with KVM. A full run prints 44 PASS lines: the gate test and the 43 tests of `scripts/tests/ctutest.py`, whose own summary reads "43 of 43 passed". Older notes in the team's records call this "44 tests". The 41-test run recorded in `docs/test-results.txt` has the same shape: the gate test and 41 tests. `rx_loss` is in `scripts/tests/signature.py` and runs on its own, so it is not part of the 44. The run logs hold target timing figures and are kept outside the repo, so no file is named here.
 
-| Driver | Full runs | Result | Record |
-|---|---|---|---|
-| main 30fff05 | 5 | 44/44 in 5 of 5 | results/ctucanfd-run2-report.md, results/aws-run-2/can2/can-main-*.txt |
-| the helper-process fix, PR #7 | 5 | 44/44 in 5 of 5; after each run the five timer-dependent tests ran 10 times each: 250/250 | results/ctucanfd-run2-report.md, results/aws-run-2/can3/ |
-| PR #8 (RX drain) | 3 | 44/44 in 3 of 3 | results/aws-run-3/can/drain/ |
+| Driver | Full runs | Result |
+|---|---|---|
+| main 30fff05 | 5 | 44/44 in 5 of 5 |
+| the helper-process fix, PR #7 | 5 | 44/44 in 5 of 5; after each run the five timer-dependent tests ran 10 times each: 250/250 |
+| PR #8 (RX drain) | 3 | 44/44 in 3 of 3 |
 
 That is 13 runs, all passing. The timer-thread version of the fix, tried before the helper process, showed 43 of 44 PASS lines in each of 5 runs: `fi_busoff_abort_notick` failed each time because the thread could not reach the driver's own device. It is history.
 
-`kill_storm`: 60 SIGKILLs, three times per driver, under load. Every driver passed all three. After every kill the supervisor had a ready driver, the number of driver processes after the run matched the number before, and none was left dead (results/aws-run-2/sig/, results/aws-run-3/can/storm3/).
+`kill_storm`: 60 SIGKILLs, three times per driver, under load. Every driver passed all three. After every kill the supervisor had a ready driver, the number of driver processes after the run matched the number before, and none was left dead.
 
 `restart_under_load` diagnostics. The checks are unchanged; when the gap count is wrong, the failure message adds each gap's start relative to the nearest kill (and how long that kill's ssh took), the driver's `slow TX` slog2 lines, and ecu-sim's `overrun` and `EAGAIN` lines (at most 32 per run). Hypotheses, most likely first, and how to read the lines:
 
@@ -150,7 +152,7 @@ That is 13 runs, all passing. The timer-thread version of the fix, tried before 
 - Every length from 0 to 64 from QNX to the host, and every classic and CAN FD length to QNX, checked byte for byte including padding; remote frames both ways; 11-bit and 29-bit ids both ways, including 29-bit ids whose low 18 bits are zero.
 - Four blocked readers on one mailbox: each of 200 frames reached exactly one reader and all four finished. Four writers at once: 4 x 100 frames, each stream in order. With no reader, the 64-frame mailbox queue kept the newest 64 of 100 frames.
 - 2000 frames of 64 bytes each way at the same time, 2 ms apart: both streams complete and in order.
-- Bounded interrupt service: 300 frames in bursts of 90 arrived in order in 7 interrupt pulses of at most 64 frames, and a client's devctls were answered 757 times while frames were still coming; with 4-frame batches the client was answered 200 times in 23 pulses. A pulse that arrives while the core is stopped after a failed reset is unmasked with the core's interrupt output left off (1 pulse, then none in the next second), and a mailbox whose wake-ups fail is retried for 8 pulses and then dropped and counted.
+- Bounded interrupt service: 300 frames in bursts of 90 arrived in order, with at least one pulse leaving work for the next, no failed unmask, and a client's devctls answered while frames were still coming; with the batch forced down to 4 frames, 90 of 90 arrived in order, no pulse took more than 4 frames, and the client was answered meanwhile. A pulse that arrives while the core is stopped after a failed reset is unmasked with the core's interrupt output left off (1 pulse, then none in the next second), and a mailbox whose wake-ups fail is retried for 8 pulses and then dropped and counted.
 - TX order across four TXT buffers: 2000/2000 in order with no pacing. With completions held back by the fault injector, 1000/1000 in order across 249 TX commands that readied several buffers at once; the same run with the first version's fixed priorities broke order 996 times (negative control).
 - Restart under load, 1 ms workload (`restart_under_load`): ecu-sim telemetry on 0x2F8 every 1 ms, the host sending 500 frames/s of 64 bytes into QNX, three `slay -s KILL dev-can-ctucanfd` 2 s apart with the supervisor: telemetry resumed after each kill.
 - Supervisor: it kills and restarts a driver that does not become ready, takes a driver as ready only when the process it started serves the path, abandons a readiness probe that a server never answers, and counts spawn failures.

@@ -30,6 +30,8 @@
  * (i >= 4) holds (seq + i) & 0xff. Both seqsend and the host test scripts use
  * this layout, so every byte of every frame is checked.
  */
+#include <ctype.h>
+#include <limits.h>
 #include <devctl.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -106,13 +108,13 @@ static int parse_id(const char *s, CAN_MSG *m)
     memcpy(digits, s, n);
     digits[n] = '\0';
     unsigned long id = strtoul(digits, &end, 16);
-    if (*end != '\0') {
-        return EINVAL;
+    if (*end != '\0' || id > 0x1fffffffu) {
+        return EINVAL;      /* no extended id has more than 29 bits */
     }
     if (id > 0x7ff) {
         ext = 1;
     }
-    m->mid = ext ? (uint32_t)(id & 0x1fffffffu) : (uint32_t)((id & 0x7ffu) << 18);
+    m->mid = ext ? (uint32_t)id : (uint32_t)((id & 0x7ffu) << 18);
     m->ext.is_extended_mid = (uint32_t)ext;
     return EOK;
 }
@@ -161,9 +163,11 @@ static int do_write(int fd, const char *hex)
     if (n < 0) {
         return EINVAL;
     }
-    if (write(fd, buf, (size_t)n) != n) {
-        fprintf(stderr, "write: %s\n", strerror(errno));
-        return errno;
+    ssize_t w = write(fd, buf, (size_t)n);
+    if (w != n) {
+        int err = w == -1 && errno != 0 ? errno : EIO;     /* a short write sets no errno */
+        fprintf(stderr, "write: %s\n", strerror(err));
+        return err;
     }
     printf("wrote %d byte(s)\n", n);
     return EOK;
@@ -215,8 +219,9 @@ static int do_seqsend(int fd, int argc, char *argv[])
     unsigned count = (unsigned)strtoul(argv[5], NULL, 0);
     unsigned gap = (unsigned)strtoul(argv[6], NULL, 0);
     unsigned long retries = 0;
-    if (len < 4 || len > CAN_MSG_DATA_MAX) {
-        return EINVAL;
+    if (len < 4 || len > CAN_MSG_DATA_MAX || (len > 8 && len != 12 && len != 16 && len != 20 && len != 24 &&
+                                              len != 32 && len != 48 && len != 64)) {
+        return EINVAL;      /* the frame on the bus carries a length that has a DLC; seqrecv checks all of it */
     }
     m.len = (uint8_t)len;
     uint64_t t0 = mono_us(), next = t0;
@@ -303,18 +308,24 @@ static int do_info(int fd)
     printf("description: %s\nbit_rate: %u  brp %u ts1 %u ts2 %u sjw %u\nmailboxes: rx %u tx %u  msgq %u waitq %u\n",
            in.description, in.bit_rate, in.bit_rate_prescaler, in.time_segment_1, in.time_segment_2,
            in.sync_jump_width, in.num_rx_mboxes, in.num_tx_mboxes, in.msgq_size, in.waitq_size);
-    if ((rc = devctl(fd, CAN_DEVCTL_GET_STATS, &st, sizeof(st), NULL)) == EOK) {
+    int first_err = EOK;
+    if ((rc = devctl(fd, CAN_DEVCTL_GET_STATS, &st, sizeof(st), NULL)) != EOK) {
+        fprintf(stderr, "CAN_DEVCTL_GET_STATS: %s\n", strerror(rc));
+        first_err = rc;
+    } else {
         printf("stats: tx %u rx %u irq %u (rx %u tx %u) frame_err %u hw_overflow %u swq_full %u "
                "warn %u passive %u bus_off %u\n",
                st.transmitted_frames, st.received_frames, st.total_interrupts, st.rx_interrupts,
                st.tx_interrupts, st.total_frame_errors, st.hw_receive_overflows, st.sw_receive_q_full,
                st.error_warning_state_count, st.error_passive_state_count, st.bus_off_state_count);
     }
-    if ((rc = devctl(fd, CAN_DEVCTL_ERROR, &er, sizeof(er), NULL)) == EOK) {
-        printf("error: fault 0x%08x rec_tec 0x%08x err_cnt 0x%08x status 0x%08x\n", er.drvr1, er.drvr2,
-               er.drvr3, er.drvr4);
+    if ((rc = devctl(fd, CAN_DEVCTL_ERROR, &er, sizeof(er), NULL)) != EOK) {
+        fprintf(stderr, "CAN_DEVCTL_ERROR: %s\n", strerror(rc));
+        return first_err != EOK ? first_err : rc;
     }
-    return EOK;
+    printf("error: fault 0x%08x rec_tec 0x%08x err_cnt 0x%08x status 0x%08x\n", er.drvr1, er.drvr2,
+           er.drvr3, er.drvr4);
+    return first_err;
 }
 
 static int do_xstats(int fd)
@@ -352,30 +363,40 @@ static int do_xstats(int fd)
 static int do_timing(int fd, const CAN_DEVCTL_TIMING *t)
 {
     ctucan_xstats_t x;
-    uint32_t fails;
+    uint32_t fails = 0;
+    int have_base = devctl(fd, CTUCAN_DEVCTL_GET_XSTATS, &x, sizeof(x), NULL) == EOK;
+    int xr;
 
-    if (devctl(fd, CTUCAN_DEVCTL_GET_XSTATS, &x, sizeof(x), NULL) != EOK) {
-        memset(&x, 0, sizeof(x));
+    if (have_base) {
+        fails = x.restart_fail;
     }
-    fails = x.restart_fail;
     int rc = devctl(fd, CAN_DEVCTL_SET_TIMING, (void *)t, sizeof(*t), NULL);
     printf("CAN_DEVCTL_SET_TIMING: %s\n", strerror(rc));
-    if (rc != EOK || devctl(fd, CTUCAN_DEVCTL_GET_XSTATS, &x, sizeof(x), NULL) != EOK ||
-        !((x.state >> 11) & 1u)) {
+    if (rc != EOK) {
         return rc;
     }
+    if ((xr = devctl(fd, CTUCAN_DEVCTL_GET_XSTATS, &x, sizeof(x), NULL)) != EOK) {
+        fprintf(stderr, "CTUCAN_DEVCTL_GET_XSTATS: %s\n", strerror(xr));
+        return xr;
+    }
+    int deferred = (x.state >> 11) & 1u;
     for (int i = 0; i < 400 && ((x.state >> 11) & 1u); i++) {
         usleep(5000);
-        if (devctl(fd, CTUCAN_DEVCTL_GET_XSTATS, &x, sizeof(x), NULL) != EOK) {
-            break;
+        if ((xr = devctl(fd, CTUCAN_DEVCTL_GET_XSTATS, &x, sizeof(x), NULL)) != EOK) {
+            fprintf(stderr, "CTUCAN_DEVCTL_GET_XSTATS: %s\n", strerror(xr));
+            return xr;
         }
     }
     if ((x.state >> 11) & 1u) {
         printf("restart deferred, still pending after 2 s\n");
         return ETIMEDOUT;
     }
-    rc = x.restart_fail != fails ? ETIMEDOUT : EOK;
-    printf("restart deferred until the TXT buffers were done: %s\n", strerror(rc));
+    /* the restart may have run, and failed, before the first read above;
+     * without a count from before, a later one proves nothing */
+    rc = have_base && x.restart_fail != fails ? ETIMEDOUT : EOK;
+    if (deferred || rc != EOK) {
+        printf("restart deferred until the TXT buffers were done: %s\n", strerror(rc));
+    }
     return rc;
 }
 
@@ -466,6 +487,11 @@ static int do_monitor(int fd, unsigned ms)
         if (dt > worst && t_last != 0) {
             worst = dt;     /* only devctls during the traffic */
         }
+    }
+    if (samples == 0) {
+        free(vals);
+        fprintf(stderr, "monitor: no sample in %u ms\n", ms);
+        return EINVAL;
     }
     unsigned first = vals[0], last = vals[samples - 1], between = 0, steps = 0;
     for (unsigned i = 0; i < samples; i++) {
@@ -568,12 +594,17 @@ static int do_tester(int rfd, int argc, char *argv[])
     if (secs == 0 || g_tx.gap_us < 100) {
         return EINVAL;
     }
+    /* the count is worked out wide: narrowed it could wrap, and with 0 frames to send nothing is checked */
+    uint64_t n64 = (uint64_t)secs * 1000000u / g_tx.gap_us;
+    if (n64 == 0 || n64 > UINT32_MAX) {
+        return EINVAL;
+    }
     g_tx.fd = open(argv[3], O_RDWR);
     if (g_tx.fd == -1) {
         fprintf(stderr, "open %s: %s\n", argv[3], strerror(errno));
         return EIO;
     }
-    g_tx.n = (unsigned)((uint64_t)secs * 1000000u / g_tx.gap_us);
+    g_tx.n = (unsigned)n64;
     g_tx.sent_us = calloc(g_tx.n, sizeof(*g_tx.sent_us));
     uint8_t *answered = calloc(g_tx.n, 1);
     uint32_t *rtt = calloc(g_tx.n, sizeof(*rtt));
@@ -720,8 +751,19 @@ int main(int argc, char *argv[])
         rc = devctl(fd, CTUCAN_DEVCTL_RECOVER, NULL, 0, NULL);
         printf("CTUCAN_DEVCTL_RECOVER: %s\n", strerror(rc));
     } else if (strcmp(cmd, "timing") == 0 && argc > 6) {
-        CAN_DEVCTL_TIMING t = { 0, (uint16_t)strtoul(argv[3], NULL, 0), (uint8_t)strtoul(argv[6], NULL, 0),
-                                (uint8_t)strtoul(argv[4], NULL, 0), (uint8_t)strtoul(argv[5], NULL, 0) };
+        unsigned long v[4];
+        static const unsigned long vmax[4] = { 0xffffu, 0xffu, 0xffu, 0xffu };
+        for (int i = 0; i < 4; i++) {
+            char *end;
+            errno = 0;
+            v[i] = isalnum((unsigned char)argv[3 + i][0]) ? strtoul(argv[3 + i], &end, 0) : ULONG_MAX;
+            if (errno != 0 || v[i] > vmax[i] || *end != '\0') {
+                fprintf(stderr, "canfd-test timing: argument %d is not a number in range\n", 3 + i);
+                close(fd);
+                return 1;
+            }
+        }
+        CAN_DEVCTL_TIMING t = { 0, (uint16_t)v[0], (uint8_t)v[3], (uint8_t)v[1], (uint8_t)v[2] };
         rc = do_timing(fd, &t);
     } else if (strcmp(cmd, "fi") == 0 && argc > 3) {
         ctucan_fi_req_t r = { (uint32_t)strtoul(argv[3], NULL, 0),

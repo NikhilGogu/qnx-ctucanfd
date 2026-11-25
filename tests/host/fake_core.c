@@ -8,6 +8,7 @@
 fake_core_t fake;
 bool fake_integrate;
 uint32_t fake_fault_reset;
+uint32_t fake_device_id_force;
 
 static unsigned rx_len[FAKE_RX_WORDS];     /* words of each frame in the FIFO, oldest first */
 static unsigned rx_nlen, rx_left;          /* frames queued; words left of the frame being read */
@@ -37,7 +38,7 @@ void fake_init(ctucan_hw_t *hw)
         fake.mode_reset |= SET_TBFBO;   /* the datasheet reset value of that bit */
     }
     fake_reset();
-    fake.device_id = 0x0202u << 16 | CTUCAN_ID_VALUE;   /* version 2.2 */
+    fake.device_id = fake_device_id_force != 0 ? fake_device_id_force : (0x0202u << 16 | CTUCAN_ID_VALUE);  /* version 2.2 */
     hw->base = (volatile uint8_t *)fake.mem;
     hw->fi = NULL;
 }

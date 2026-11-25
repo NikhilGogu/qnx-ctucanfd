@@ -143,6 +143,7 @@ static void body_tx_wrap(void)
      * first set fills every buffer, the queue fills behind it, and the refill
      * after they finish goes past the end of the ring in one tx_kick(). */
     g_drv.txb_head = g_drv.txb_tail = g_drv.ntxb - 1;
+    tx_set_prio(&g_drv);    /* the priorities the driver holds for a ring that starts there */
     wrap_nsent = 0;
     for (unsigned round = 0; round < 4 * total && wrap_nsent < total; round++) {
         while (written < total && lc.dev[TX1]->msg_queue->msgcnt < g_drv.ntxb) {
@@ -150,23 +151,25 @@ static void body_tx_wrap(void)
             CHECK_EQ(fake_write(TX1, &m), 0);
             written++;
         }
-        /* the core sends the ready buffers oldest first */
-        unsigned rdy[CTUCAN_TXT_BUFFERS], n = 0;
-        for (unsigned b = 0; b < CTUCAN_TXT_BUFFERS; b++) {
-            if (fake.txt[b] == TXT_RDY) {
-                rdy[n++] = b;
+        /* the core sends the ready buffer with the highest priority in TX_PRIORITY, the lower buffer
+         * number first among equals (the same rule as test_txw_orders.c): the order comes from what
+         * the driver programmed, not from the ids the test chose */
+        uint32_t prio = fake.mem[CTUCAN_TX_PRIORITY / 4];
+        for (;;) {
+            int best = -1;
+            unsigned best_p = 0;
+            for (unsigned b = 0; b < CTUCAN_TXT_BUFFERS; b++) {
+                unsigned p = (prio >> (4u * b)) & 7u;
+                if (fake.txt[b] == TXT_RDY && (best < 0 || p > best_p)) {
+                    best = (int)b;
+                    best_p = p;
+                }
             }
-        }
-        for (unsigned i = 1; i < n; i++) {
-            for (unsigned j = i; j > 0 && txt_id(rdy[j]) < txt_id(rdy[j - 1]); j--) {
-                unsigned t = rdy[j];
-                rdy[j] = rdy[j - 1];
-                rdy[j - 1] = t;
+            if (best < 0 || wrap_nsent >= 64) {
+                break;
             }
-        }
-        for (unsigned i = 0; i < n && wrap_nsent < 64; i++) {
-            wrap_sent[wrap_nsent++] = txt_id(rdy[i]);
-            fake.txt[rdy[i]] = TXT_TOK;
+            wrap_sent[wrap_nsent++] = txt_id((unsigned)best);
+            fake.txt[best] = TXT_TOK;
         }
         irq(INT_TXBHCI);
         fake_pulse();
@@ -1119,8 +1122,113 @@ static void body_slow_tx(void)
     CHECK_EQ(g_drv.tx_slow, 5);
 }
 
+/* ---- an option value that is not a number ------------------------------- */
+
+/* "-R junk" must not turn into -R 0 (a retransmission limit nobody asked
+ * for), nor 4294967297 into 1: each is refused before anything is touched. */
+static void test_option_numbers(void)
+{
+    static const char *const bad[] = { "-R junk", "-R 3x", "-R -1", "-b 500k", "-k ", "-r 4294967297",
+                                       "-q 64q", "-u x" };
+
+    for (unsigned i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        int rc = run(bad[i], body_start);
+        CHECK(rc == EINVAL, "'%s' gave %d, not EINVAL", bad[i], rc);
+        CHECK(!lc.started && !lc.resmgr_up, "'%s' started the driver", bad[i]);
+    }
+    CHECK_EQ(run("-R 0x3 -b 500000", body_start), 0);   /* a base strtoul reads is still a number */
+}
+
+/* ---- a BAR that is not a CTU CAN FD core ---------------------------------- */
+
+/* The registers of something else at those offsets mean nothing: the driver
+ * must leave without writing one (INT_ENA_CLR, MODE and INT_STAT of the core
+ * are other registers there). */
+static void body_never(void)
+{
+    CHECK(false, "the driver started on a core that failed the identity check");
+}
+
+static void test_identify_fail(void)
+{
+    fake_device_id_force = 0x02020000u | 0xbeefu;
+    int rc = run("", body_never);
+    fake_device_id_force = 0;
+    CHECK_EQ(rc, ENODEV);
+    CHECK(fake.nlog == 0, "%u register write(s) to a core that failed the identity check, first at 0x%x",
+          fake.nlog, fake.nlog > 0 ? fake.log[0].off : 0u);
+}
+
+/* ---- classic CAN only: the data phase timing is not needed ---------------- */
+
+/* 8 MHz and 500 kbit/s nominal is 16 time quanta, which is fine. The default
+ * 2 Mbit/s data rate would be 4 quanta, which no CAN FD timing can use, but
+ * with -C the data phase is never on. */
+static bool g_classic_body_ran;
+
+static void body_classic_8mhz(void)
+{
+    g_classic_body_ran = true;
+    CHECK_EQ(fake.mem[CTUCAN_MODE / 4] & (SET_ENA | MODE_FDE), SET_ENA);    /* on the bus, FD off */
+    CHECK_EQ((fake.mem[CTUCAN_BTR / 4] >> BTR_BRP_SHIFT) & 0xffu, 1);
+
+    /* a new reference clock needs no data phase either */
+    CAN_DEVCTL_TIMING t = { .ref_clock_freq = 8000000u, .bit_rate_prescaler = 1, .sync_jump_width = 2,
+                            .time_segment_1 = 13, .time_segment_2 = 2 };
+    CHECK_EQ(dc(RX0, CAN_DEVCTL_SET_TIMING, &t, sizeof(t), 0), 0);
+    CHECK_EQ(xstats().restarts, 1);
+}
+
+/* BTR_FD holds a 6 bit prop, a 5 bit ph1 and a 5 bit ph2 (bits 6, 12 and 18 are
+ * reserved). A nominal tuple copied into it can set those bits. */
+static void check_btr_fd_fits(const char *what)
+{
+    uint32_t v = fake.mem[CTUCAN_BTR_FD / 4];
+    unsigned prop = (v >> BTR_PROP_SHIFT) & 0x7fu, ph1 = (v >> BTR_PH1_SHIFT) & 0x3fu,
+             ph2 = (v >> BTR_PH2_SHIFT) & 0x3fu;
+    ctucan_bt_t bt = { .brp = (uint16_t)((v >> BTR_BRP_SHIFT) & 0xffu), .prop = (uint8_t)prop,
+                       .ph1 = (uint8_t)ph1, .ph2 = (uint8_t)ph2, .sjw = (uint8_t)((v >> BTR_SJW_SHIFT) & 0x1fu) };
+
+    CHECK(prop <= 63u, "%s: BTR_FD prop %u is wider than its field (reg 0x%08x)", what, prop, (unsigned)v);
+    CHECK(ph1 <= 31u, "%s: BTR_FD ph1 %u is wider than its field (reg 0x%08x)", what, ph1, (unsigned)v);
+    CHECK(ph2 <= 31u, "%s: BTR_FD ph2 %u is wider than its field (reg 0x%08x)", what, ph2, (unsigned)v);
+    CHECK_EQ(ctucan_bt_check(&bt, true), 0);
+}
+
+/* a clock and rate whose nominal timing needs prop 111 (more than 63) and whose
+ * 3 Mbit/s data rate has no timing at all */
+static bool g_wide_body_ran;
+
+static void body_classic_wide(void)
+{
+    g_wide_body_ran = true;
+    check_btr_fd_fits("start");
+
+    /* a new clock with a long nominal timing and no data timing */
+    CAN_DEVCTL_TIMING t = { .ref_clock_freq = 8500000u, .bit_rate_prescaler = 8, .sync_jump_width = 2,
+                            .time_segment_1 = 150, .time_segment_2 = 49 };
+    CHECK_EQ(dc(RX0, CAN_DEVCTL_SET_TIMING, &t, sizeof(t), 0), 0);
+    CHECK_EQ(xstats().restarts, 1);
+    check_btr_fd_fits("set timing");
+}
+
+static void test_classic_only_timing(void)
+{
+    g_wide_body_ran = false;
+    CHECK_EQ(run("-C -k 80000000 -b 5000 -d 3000000", body_classic_wide), 0);
+    CHECK(g_wide_body_ran, "a classic-only start with a long nominal timing was refused");
+
+    g_classic_body_ran = false;
+    CHECK_EQ(run("-C -k 8000000 -b 500000", body_classic_8mhz), 0);
+    CHECK(g_classic_body_ran, "a classic-only start at 8 MHz, 500 kbit/s was refused");
+    CHECK_EQ(g_drv.bitrate, 500000);
+}
+
 int main(void)
 {
+    test_identify_fail();
+    test_option_numbers();
+    test_classic_only_timing();
     test_start_stop();
     test_tx_ring();
     test_tx_wrap();

@@ -53,9 +53,22 @@ int ConnectAttach(uint32_t nd, pid_t pid, int chid, unsigned index, int flags)
     errno = ENOSYS;
     return -1;
 }
+/* what the probe's ConnectServerInfo() and devctl() answer: 0 = no QNX (-1, ENOSYS);
+ * 1 = a valid connection, the server is the test process and answers GET_INFO;
+ * 2 = a connection id that is not the fd, no error (errno 0) */
+static int g_csi_mode;
+
 int ConnectServerInfo(pid_t pid, int coid, struct _server_info *info)
 {
-    (void)pid; (void)coid; (void)info;
+    (void)pid;
+    errno = 0;
+    if (g_csi_mode == 1) {
+        info->pid = getppid();
+        return coid;
+    }
+    if (g_csi_mode == 2) {
+        return coid + 1;
+    }
     errno = ENOSYS;
     return -1;
 }
@@ -74,7 +87,7 @@ int procmgr_event_notify(unsigned flags, const struct sigevent *ev) { (void)flag
 int devctl(int fd, int dcmd, void *data, size_t nbytes, int *info)
 {
     (void)fd; (void)dcmd; (void)data; (void)nbytes; (void)info;
-    return ENOSYS;
+    return g_csi_mode == 1 ? EOK : ENOSYS;
 }
 
 int main(void)
@@ -94,6 +107,16 @@ int main(void)
     close(out);
     signal(SIGTERM, SIG_DFL);
     signal(SIGINT, SIG_DFL);
+
+    /* the probe: a connection id that differs from the fd is no success, whatever errno holds */
+    pid_t server = 0;
+    g_csi_mode = 1;
+    CHECK_EQ(probe("/dev/null", getpid(), 2000, &server), EOK);
+    CHECK_EQ(server, getpid());
+    g_csi_mode = 2;
+    int prc = probe("/dev/null", getpid(), 2000, &server);
+    CHECK(prc != EOK, "probe took a connection id that is not the fd for success");
+    g_csi_mode = 0;
 
     CHECK_EQ(rc, 0);
     CHECK_EQ(sleeps, 1);
