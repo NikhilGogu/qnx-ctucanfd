@@ -13,7 +13,7 @@ SAN     ?= -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-fram
 HW      := $(SRC)/ctucanfd_hw.c fake_core.c
 HDRS    := $(SRC)/ctucanfd_hw.h $(SRC)/ctucanfd_regs.h $(SRC)/ctucanfd_time.h fake_core.h check.h $(wildcard shim/*.h shim/*/*.h)
 DRV     := $(SRC)/dev-can-ctucanfd.c $(SRC)/ctucanfd_devctl.h $(SRC)/ctucanfd_timer.h fake_libcan.c fake_libcan.h
-TESTS   := test_dlc_timing test_frames test_core test_mode_rmw test_time test_driver test_fi test_txw_orders test_no_sleep test_rx_restart test_integ_hold test_supervisor
+TESTS   := test_dlc_timing test_frames test_core test_mode_rmw test_time test_driver test_fi test_txw_orders test_no_sleep test_rx_restart test_integ_hold test_supervisor test_canfd_tool
 
 all: $(addprefix $(BUILD)/,$(TESTS))
 
@@ -22,6 +22,10 @@ $(BUILD):
 
 $(BUILD)/%: %.c $(HW) $(HDRS) | $(BUILD)
 	$(CC) $(CFLAGS) $(SAN) -o $@ $< $(HW)
+
+# these two include a tool's source, so a change there rebuilds them
+$(BUILD)/test_supervisor: ../../tools/ctucan-supervisor.c
+$(BUILD)/test_canfd_tool: ../../tools/canfd-test.c
 
 # includes the driver source; see the comment at the top of test_driver.c
 $(BUILD)/test_driver: test_driver.c $(HW) $(HDRS) $(DRV) driver_harness.h | $(BUILD)

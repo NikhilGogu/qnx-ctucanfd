@@ -352,30 +352,39 @@ static int do_xstats(int fd)
 static int do_timing(int fd, const CAN_DEVCTL_TIMING *t)
 {
     ctucan_xstats_t x;
-    uint32_t fails;
+    uint32_t fails = 0;
+    int have_base = devctl(fd, CTUCAN_DEVCTL_GET_XSTATS, &x, sizeof(x), NULL) == EOK;
+    int xr;
 
-    if (devctl(fd, CTUCAN_DEVCTL_GET_XSTATS, &x, sizeof(x), NULL) != EOK) {
-        memset(&x, 0, sizeof(x));
+    if (have_base) {
+        fails = x.restart_fail;
     }
-    fails = x.restart_fail;
     int rc = devctl(fd, CAN_DEVCTL_SET_TIMING, (void *)t, sizeof(*t), NULL);
     printf("CAN_DEVCTL_SET_TIMING: %s\n", strerror(rc));
-    if (rc != EOK || devctl(fd, CTUCAN_DEVCTL_GET_XSTATS, &x, sizeof(x), NULL) != EOK ||
-        !((x.state >> 11) & 1u)) {
-        return rc;
+    if (rc != EOK || !have_base) {
+        return rc;      /* without a count from before, a later one proves nothing */
     }
+    if ((xr = devctl(fd, CTUCAN_DEVCTL_GET_XSTATS, &x, sizeof(x), NULL)) != EOK) {
+        fprintf(stderr, "CTUCAN_DEVCTL_GET_XSTATS: %s\n", strerror(xr));
+        return xr;
+    }
+    int deferred = (x.state >> 11) & 1u;
     for (int i = 0; i < 400 && ((x.state >> 11) & 1u); i++) {
         usleep(5000);
-        if (devctl(fd, CTUCAN_DEVCTL_GET_XSTATS, &x, sizeof(x), NULL) != EOK) {
-            break;
+        if ((xr = devctl(fd, CTUCAN_DEVCTL_GET_XSTATS, &x, sizeof(x), NULL)) != EOK) {
+            fprintf(stderr, "CTUCAN_DEVCTL_GET_XSTATS: %s\n", strerror(xr));
+            return xr;
         }
     }
     if ((x.state >> 11) & 1u) {
         printf("restart deferred, still pending after 2 s\n");
         return ETIMEDOUT;
     }
+    /* the restart may have run, and failed, before the first read above */
     rc = x.restart_fail != fails ? ETIMEDOUT : EOK;
-    printf("restart deferred until the TXT buffers were done: %s\n", strerror(rc));
+    if (deferred || rc != EOK) {
+        printf("restart deferred until the TXT buffers were done: %s\n", strerror(rc));
+    }
     return rc;
 }
 

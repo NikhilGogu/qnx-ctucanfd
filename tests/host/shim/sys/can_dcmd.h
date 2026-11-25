@@ -53,6 +53,11 @@ typedef struct {
     uint32_t drvr1, drvr2, drvr3, drvr4;
 } CAN_DEVCTL_ERROR;
 
+/* the tag QNX gives the same layout; tools/canfd-test.c names it */
+struct can_devctl_error {
+    uint32_t drvr1, drvr2, drvr3, drvr4;
+};
+
 typedef struct {
     uint32_t ref_clock_freq;
     uint16_t bit_rate_prescaler;
