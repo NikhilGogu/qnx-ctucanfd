@@ -184,11 +184,27 @@ static void test_write_short(void)
     CHECK(run_tool(4, argv) != 0, "a failed write was reported as success");
 }
 
+/* info: a query that fails after GET_INFO answered must show in the exit status */
+static void test_info_queries(void)
+{
+    char *argv[] = { "canfd-test", "info", "/dev/null", NULL };
+
+    memset(&fk, 0, sizeof(fk));
+    CHECK_EQ(run_tool(3, argv), 0);
+    memset(&fk, 0, sizeof(fk));
+    fk.stats_rc = EIO;
+    CHECK(run_tool(3, argv) != 0, "info reported success with GET_STATS failing");
+    memset(&fk, 0, sizeof(fk));
+    fk.error_rc = EIO;
+    CHECK(run_tool(3, argv) != 0, "info reported success with the error query failing");
+}
+
 int main(void)
 {
     test_timing_reports_failed_restart();
     test_monitor_no_sample();
     test_send_id();
     test_write_short();
+    test_info_queries();
     return check_exit("test_canfd_tool");
 }

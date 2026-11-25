@@ -305,18 +305,24 @@ static int do_info(int fd)
     printf("description: %s\nbit_rate: %u  brp %u ts1 %u ts2 %u sjw %u\nmailboxes: rx %u tx %u  msgq %u waitq %u\n",
            in.description, in.bit_rate, in.bit_rate_prescaler, in.time_segment_1, in.time_segment_2,
            in.sync_jump_width, in.num_rx_mboxes, in.num_tx_mboxes, in.msgq_size, in.waitq_size);
-    if ((rc = devctl(fd, CAN_DEVCTL_GET_STATS, &st, sizeof(st), NULL)) == EOK) {
+    int first_err = EOK;
+    if ((rc = devctl(fd, CAN_DEVCTL_GET_STATS, &st, sizeof(st), NULL)) != EOK) {
+        fprintf(stderr, "CAN_DEVCTL_GET_STATS: %s\n", strerror(rc));
+        first_err = rc;
+    } else {
         printf("stats: tx %u rx %u irq %u (rx %u tx %u) frame_err %u hw_overflow %u swq_full %u "
                "warn %u passive %u bus_off %u\n",
                st.transmitted_frames, st.received_frames, st.total_interrupts, st.rx_interrupts,
                st.tx_interrupts, st.total_frame_errors, st.hw_receive_overflows, st.sw_receive_q_full,
                st.error_warning_state_count, st.error_passive_state_count, st.bus_off_state_count);
     }
-    if ((rc = devctl(fd, CAN_DEVCTL_ERROR, &er, sizeof(er), NULL)) == EOK) {
-        printf("error: fault 0x%08x rec_tec 0x%08x err_cnt 0x%08x status 0x%08x\n", er.drvr1, er.drvr2,
-               er.drvr3, er.drvr4);
+    if ((rc = devctl(fd, CAN_DEVCTL_ERROR, &er, sizeof(er), NULL)) != EOK) {
+        fprintf(stderr, "CAN_DEVCTL_ERROR: %s\n", strerror(rc));
+        return first_err != EOK ? first_err : rc;
     }
-    return EOK;
+    printf("error: fault 0x%08x rec_tec 0x%08x err_cnt 0x%08x status 0x%08x\n", er.drvr1, er.drvr2,
+           er.drvr3, er.drvr4);
+    return first_err;
 }
 
 static int do_xstats(int fd)
