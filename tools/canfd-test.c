@@ -591,12 +591,17 @@ static int do_tester(int rfd, int argc, char *argv[])
     if (secs == 0 || g_tx.gap_us < 100) {
         return EINVAL;
     }
+    /* the count is worked out wide: narrowed it could wrap, and with 0 frames to send nothing is checked */
+    uint64_t n64 = (uint64_t)secs * 1000000u / g_tx.gap_us;
+    if (n64 == 0 || n64 > UINT32_MAX) {
+        return EINVAL;
+    }
     g_tx.fd = open(argv[3], O_RDWR);
     if (g_tx.fd == -1) {
         fprintf(stderr, "open %s: %s\n", argv[3], strerror(errno));
         return EIO;
     }
-    g_tx.n = (unsigned)((uint64_t)secs * 1000000u / g_tx.gap_us);
+    g_tx.n = (unsigned)n64;
     g_tx.sent_us = calloc(g_tx.n, sizeof(*g_tx.sent_us));
     uint8_t *answered = calloc(g_tx.n, 1);
     uint32_t *rtt = calloc(g_tx.n, sizeof(*rtt));

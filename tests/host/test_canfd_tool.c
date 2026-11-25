@@ -39,6 +39,8 @@ static struct {
     int      stats_rc, error_rc;    /* GET_STATS and ERROR replies */
     ssize_t  write_ret;             /* test_write() result; -1 sets errno to write_errno */
     int      write_errno;
+    int      serve_telemetry;       /* READ_CANMSG_EXT answers with telemetry frames 18F, 64 bytes, good CRC */
+    uint32_t tel_seq;
 } fk;
 
 static ssize_t test_write(int fd, const void *buf, size_t n)
@@ -75,6 +77,17 @@ int devctl(int fd, int dcmd, void *data, size_t nbytes, int *info)
     if (dcmd == CAN_DEVCTL_ERROR) {
         memset(data, 0, sizeof(struct can_devctl_error));
         return fk.error_rc;
+    }
+    if (dcmd == CAN_DEVCTL_READ_CANMSG_EXT && fk.serve_telemetry) {
+        CAN_MSG *m = data;
+        memset(m, 0, sizeof(*m));
+        m->mid = 0x18fu << 18;
+        m->len = 64;
+        memcpy(m->dat, &fk.tel_seq, 4);     /* the host is little endian, like the tool's reader */
+        fk.tel_seq++;
+        m->dat[63] = crc8(m->dat, 63);
+        usleep(2000);
+        return EOK;
     }
     if (dcmd == CAN_DEVCTL_GET_INFO) {
         memset(data, 0, sizeof(CAN_DEVCTL_INFO));
@@ -219,6 +232,17 @@ static void test_seqsend_length(void)
     CHECK_EQ(fk.frames_written, 6);
 }
 
+/* a run whose gap is longer than the run sends nothing, so it can check nothing */
+static void test_tester_empty_run(void)
+{
+    char *argv[] = { "canfd-test", "tester", "/dev/null", "/dev/null", "1", "2000000", NULL };
+
+    memset(&fk, 0, sizeof(fk));
+    fk.serve_telemetry = 1;
+    CHECK(run_tool(6, argv) != 0, "a tester run with no frame to send was reported as PASS");
+    CHECK_EQ(fk.frames_written, 0);
+}
+
 int main(void)
 {
     test_timing_reports_failed_restart();
@@ -227,5 +251,6 @@ int main(void)
     test_write_short();
     test_info_queries();
     test_seqsend_length();
+    test_tester_empty_run();
     return check_exit("test_canfd_tool");
 }
