@@ -103,13 +103,15 @@ static int probe(const char *path, pid_t pid, unsigned ms, pid_t *server)
     }
     if (c == 0) {
         struct _server_info si;
+        int coid;
         close(fds[0]);
         res[0] = ENOENT;
         int fd = open(path, O_RDWR);
         if (fd == -1) {
             res[0] = errno;
-        } else if (ConnectServerInfo(0, fd, &si) != fd) {
-            res[0] = errno;
+        } else if ((coid = ConnectServerInfo(0, fd, &si)) != fd) {
+            /* errno holds a cause only when the call failed with -1 */
+            res[0] = (coid == -1 && errno != 0) ? errno : EBADF;
         } else if ((res[1] = si.pid) != pid) {
             res[0] = ESRCH;
         } else {
