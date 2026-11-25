@@ -26,8 +26,8 @@ rc=0
 gate=pass
 "$D/scripts/gate-test.sh" "$TGT" "$IF" || { rc=1; gate=FAIL; }
 echo "# gate-test.sh: $gate"
-# without a peer the skip of two_nodes is the intended one-target run; with a peer a skip fails the run
-ALLOW=; [ -n "$PEER" ] || ALLOW=--allow-skip
+# without a peer the skip of two_nodes is the intended one-target run; any other skip, or any skip with a peer, fails the run
+ALLOW=; [ -n "$PEER" ] || ALLOW="--allow-skip two_nodes"
 "$D/scripts/tests/ctutest.py" --target "$TGT" --if "$IF" ${PEER:+--peer "$PEER"} $ALLOW ${JUNIT:+--junit "$JUNIT"} || rc=1
 echo "# results: $OUT, exit $rc"
 exit $rc

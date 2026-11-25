@@ -49,7 +49,11 @@ class MainTest(unittest.TestCase):
             self.calls.append("delta")
             raise ctutest.Fail("broken")
 
-        self.funcs = [t_alpha, t_beta, t_gamma, t_delta]
+        def t_epsilon(t, bus):
+            self.calls.append("epsilon")
+            raise ctutest.Skip("needs something else")
+
+        self.funcs = [t_alpha, t_beta, t_gamma, t_delta, t_epsilon]
 
     def run_main(self, args, funcs=None):
         out = io.StringIO()
@@ -76,13 +80,26 @@ class MainTest(unittest.TestCase):
         self.assertEqual(rc, 1)
 
     def test_skip_on_purpose_keeps_exit_zero(self):
-        rc, lines = self.run_main(["--allow-skip", "alpha", "gamma"])
+        rc, lines = self.run_main(["--allow-skip", "gamma", "alpha", "gamma"])
         self.assertEqual(lines[-1], "1 of 1 passed, 1 skipped (gamma)")
         self.assertEqual(rc, 0)
 
+    def test_a_second_skipped_case_still_fails_the_run(self):
+        rc, lines = self.run_main(["--allow-skip", "gamma", "alpha", "gamma", "epsilon"])
+        self.assertEqual(lines[-1], "1 of 1 passed, 2 skipped (gamma, epsilon)")
+        self.assertEqual(rc, 1)
+
+    def test_allow_skip_takes_a_list(self):
+        rc, lines = self.run_main(["--allow-skip", "gamma", "--allow-skip", "epsilon", "alpha", "gamma", "epsilon"])
+        self.assertEqual(rc, 0)
+
+    def test_allowing_a_case_that_did_not_skip_changes_nothing(self):
+        rc, lines = self.run_main(["--allow-skip", "alpha", "gamma"])
+        self.assertEqual(rc, 1)
+
     def test_allow_skip_does_not_hide_a_failure(self):
-        rc, lines = self.run_main(["--allow-skip", "alpha", "delta"])
-        self.assertEqual(lines[-1], "1 of 2 passed")
+        rc, lines = self.run_main(["--allow-skip", "gamma", "alpha", "gamma", "delta"])
+        self.assertEqual(lines[-1], "1 of 2 passed, 1 skipped (gamma)")
         self.assertEqual(rc, 1)
 
     def test_case_not_named_is_not_a_skip(self):
