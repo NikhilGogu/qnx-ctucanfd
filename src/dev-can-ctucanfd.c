@@ -1335,10 +1335,27 @@ static void usage(void)
            CTUCAN_PCI_VENDOR, CTUCAN_PCI_DEVICE);
 }
 
+/* The whole of optarg must be a number (any base strtoul takes) that fits in 32 bits:
+ * "junk" is not 0 and 4294967297 is not 1. */
+static int opt_uns(const char *s, unsigned *out)
+{
+    char *end;
+    unsigned long v;
+
+    errno = 0;
+    v = strtoul(s, &end, 0);
+    if (s[0] == '\0' || *end != '\0' || errno != 0 || v > UINT32_MAX || strchr(s, '-') != NULL) {
+        fprintf(stderr, DRV_NAME ": '%s' is not a number\n", s);
+        return EINVAL;
+    }
+    *out = (unsigned)v;
+    return EOK;
+}
+
 static int parse_args(drv_t *d, int argc, char *argv[])
 {
     int c;
-    unsigned long retr = 0;
+    unsigned retr = 0;
 
     d->nrx = d->ntx = 1;
     d->msgq = 64;
@@ -1354,18 +1371,18 @@ static int parse_args(drv_t *d, int argc, char *argv[])
     d->unit = 0;
     while ((c = getopt(argc, argv, "i:c:u:r:t:q:w:T:b:d:k:R:xCASlLaEvh")) != -1) {
         switch (c) {
-        case 'i': d->pci_index = strtoul(optarg, NULL, 0); break;
-        case 'c': d->core = strtoul(optarg, NULL, 0); break;
-        case 'u': d->unit = strtoul(optarg, NULL, 0); break;
-        case 'r': d->nrx = strtoul(optarg, NULL, 0); break;
-        case 't': d->ntx = strtoul(optarg, NULL, 0); break;
-        case 'q': d->msgq = strtoul(optarg, NULL, 0); break;
-        case 'w': d->waitq = strtoul(optarg, NULL, 0); break;
-        case 'T': d->ntxb = strtoul(optarg, NULL, 0); break;
+        case 'i': if (opt_uns(optarg, &d->pci_index) != EOK) return EINVAL; break;
+        case 'c': if (opt_uns(optarg, &d->core) != EOK) return EINVAL; break;
+        case 'u': if (opt_uns(optarg, &d->unit) != EOK) return EINVAL; break;
+        case 'r': if (opt_uns(optarg, &d->nrx) != EOK) return EINVAL; break;
+        case 't': if (opt_uns(optarg, &d->ntx) != EOK) return EINVAL; break;
+        case 'q': if (opt_uns(optarg, &d->msgq) != EOK) return EINVAL; break;
+        case 'w': if (opt_uns(optarg, &d->waitq) != EOK) return EINVAL; break;
+        case 'T': if (opt_uns(optarg, &d->ntxb) != EOK) return EINVAL; break;
         case 'x': d->ext = true; break;
-        case 'b': d->bitrate = strtoul(optarg, NULL, 0); break;
-        case 'd': d->dbitrate = strtoul(optarg, NULL, 0); break;
-        case 'k': d->clk_hz = strtoul(optarg, NULL, 0); break;
+        case 'b': if (opt_uns(optarg, &d->bitrate) != EOK) return EINVAL; break;
+        case 'd': if (opt_uns(optarg, &d->dbitrate) != EOK) return EINVAL; break;
+        case 'k': if (opt_uns(optarg, &d->clk_hz) != EOK) return EINVAL; break;
         case 'C': d->fd = false; break;
         case 'A': d->fd_always = true; break;
         case 'S': d->brs = false; break;
@@ -1374,7 +1391,9 @@ static int parse_args(drv_t *d, int argc, char *argv[])
         case 'a': d->autobus = true; break;
         case 'E': d->no_bei = true; break;
         case 'R':
-            retr = strtoul(optarg, NULL, 0);
+            if (opt_uns(optarg, &retr) != EOK) {
+                return EINVAL;
+            }
             d->cfg.retr_limit = true;
             break;
         case 'v': d->verbosity++; break;

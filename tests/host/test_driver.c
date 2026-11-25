@@ -1119,6 +1119,23 @@ static void body_slow_tx(void)
     CHECK_EQ(g_drv.tx_slow, 5);
 }
 
+/* ---- an option value that is not a number ------------------------------- */
+
+/* "-R junk" must not turn into -R 0 (a retransmission limit nobody asked
+ * for), nor 4294967297 into 1: each is refused before anything is touched. */
+static void test_option_numbers(void)
+{
+    static const char *const bad[] = { "-R junk", "-R 3x", "-R -1", "-b 500k", "-k ", "-r 4294967297",
+                                       "-q 64q", "-u x" };
+
+    for (unsigned i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        int rc = run(bad[i], body_start);
+        CHECK(rc == EINVAL, "'%s' gave %d, not EINVAL", bad[i], rc);
+        CHECK(!lc.started && !lc.resmgr_up, "'%s' started the driver", bad[i]);
+    }
+    CHECK_EQ(run("-R 0x3 -b 500000", body_start), 0);   /* a base strtoul reads is still a number */
+}
+
 /* ---- a BAR that is not a CTU CAN FD core ---------------------------------- */
 
 /* The registers of something else at those offsets mean nothing: the driver
@@ -1170,6 +1187,7 @@ static void test_classic_only_timing(void)
 int main(void)
 {
     test_identify_fail();
+    test_option_numbers();
     test_classic_only_timing();
     test_start_stop();
     test_tx_ring();
