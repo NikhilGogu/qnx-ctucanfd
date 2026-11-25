@@ -1119,8 +1119,29 @@ static void body_slow_tx(void)
     CHECK_EQ(g_drv.tx_slow, 5);
 }
 
+/* ---- a BAR that is not a CTU CAN FD core ---------------------------------- */
+
+/* The registers of something else at those offsets mean nothing: the driver
+ * must leave without writing one (INT_ENA_CLR, MODE and INT_STAT of the core
+ * are other registers there). */
+static void body_never(void)
+{
+    CHECK(false, "the driver started on a core that failed the identity check");
+}
+
+static void test_identify_fail(void)
+{
+    fake_device_id_force = 0x02020000u | 0xbeefu;
+    int rc = run("", body_never);
+    fake_device_id_force = 0;
+    CHECK_EQ(rc, ENODEV);
+    CHECK(fake.nlog == 0, "%u register write(s) to a core that failed the identity check, first at 0x%x",
+          fake.nlog, fake.nlog > 0 ? fake.log[0].off : 0u);
+}
+
 int main(void)
 {
+    test_identify_fail();
     test_start_stop();
     test_tx_ring();
     test_tx_wrap();

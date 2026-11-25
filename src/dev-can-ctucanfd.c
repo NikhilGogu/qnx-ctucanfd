@@ -100,6 +100,7 @@ struct drv {
     uint32_t        int_ena;
     unsigned        ver_major, ver_minor, ncores;
     bool            resmgr_up, hw_started;
+    bool            identified;     /* DEVICE_ID read as a CTU CAN FD core: only then are its registers written */
 
     /* interrupt service */
     bool        in_event, suppressed, notify_left;
@@ -1563,7 +1564,7 @@ static void teardown(drv_t *d)
     if (d->hw_started) {
         tx_shutdown_wait(d);
     }
-    if (d->map != NULL) {
+    if (d->map != NULL && d->identified) {
         ctucan_hw_stop(&d->hw);     /* also after a failed restart: leave the core off the bus */
         d->hw_started = false;
         d->suppressed = true;
@@ -1624,6 +1625,7 @@ int main(int argc, char *argv[])
         rc = ENODEV;
         goto fail;
     }
+    d->identified = true;
 #ifdef CTUCAN_FI
     if ((d->hw.fi = ctucan_fi_create()) == NULL) {
         rc = ENOMEM;
