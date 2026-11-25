@@ -1179,8 +1179,45 @@ static void body_classic_8mhz(void)
     CHECK_EQ(xstats().restarts, 1);
 }
 
+/* BTR_FD holds a 6 bit prop, a 5 bit ph1 and a 5 bit ph2 (bits 6, 12 and 18 are
+ * reserved). A nominal tuple copied into it can set those bits. */
+static void check_btr_fd_fits(const char *what)
+{
+    uint32_t v = fake.mem[CTUCAN_BTR_FD / 4];
+    unsigned prop = (v >> BTR_PROP_SHIFT) & 0x7fu, ph1 = (v >> BTR_PH1_SHIFT) & 0x3fu,
+             ph2 = (v >> BTR_PH2_SHIFT) & 0x3fu;
+    ctucan_bt_t bt = { .brp = (uint16_t)((v >> BTR_BRP_SHIFT) & 0xffu), .prop = (uint8_t)prop,
+                       .ph1 = (uint8_t)ph1, .ph2 = (uint8_t)ph2, .sjw = (uint8_t)((v >> BTR_SJW_SHIFT) & 0x1fu) };
+
+    CHECK(prop <= 63u, "%s: BTR_FD prop %u is wider than its field (reg 0x%08x)", what, prop, (unsigned)v);
+    CHECK(ph1 <= 31u, "%s: BTR_FD ph1 %u is wider than its field (reg 0x%08x)", what, ph1, (unsigned)v);
+    CHECK(ph2 <= 31u, "%s: BTR_FD ph2 %u is wider than its field (reg 0x%08x)", what, ph2, (unsigned)v);
+    CHECK_EQ(ctucan_bt_check(&bt, true), 0);
+}
+
+/* a clock and rate whose nominal timing needs prop 111 (more than 63) and whose
+ * 3 Mbit/s data rate has no timing at all */
+static bool g_wide_body_ran;
+
+static void body_classic_wide(void)
+{
+    g_wide_body_ran = true;
+    check_btr_fd_fits("start");
+
+    /* a new clock with a long nominal timing and no data timing */
+    CAN_DEVCTL_TIMING t = { .ref_clock_freq = 8500000u, .bit_rate_prescaler = 8, .sync_jump_width = 2,
+                            .time_segment_1 = 150, .time_segment_2 = 49 };
+    CHECK_EQ(dc(RX0, CAN_DEVCTL_SET_TIMING, &t, sizeof(t), 0), 0);
+    CHECK_EQ(xstats().restarts, 1);
+    check_btr_fd_fits("set timing");
+}
+
 static void test_classic_only_timing(void)
 {
+    g_wide_body_ran = false;
+    CHECK_EQ(run("-C -k 80000000 -b 5000 -d 3000000", body_classic_wide), 0);
+    CHECK(g_wide_body_ran, "a classic-only start with a long nominal timing was refused");
+
     g_classic_body_ran = false;
     CHECK_EQ(run("-C -k 8000000 -b 500000", body_classic_8mhz), 0);
     CHECK(g_classic_body_ran, "a classic-only start at 8 MHz, 500 kbit/s was refused");

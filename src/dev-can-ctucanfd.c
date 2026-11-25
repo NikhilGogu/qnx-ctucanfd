@@ -1082,6 +1082,11 @@ static int restart_request(drv_t *d, bool *deferred)
     return restart_now(d);
 }
 
+/* BTR_FD content with -C when no data phase timing exists. The core still takes the
+ * register, and the nominal tuple can be wider than its fields; this one fits them
+ * and passes ctucan_bt_check() for the data phase. */
+#define CLASSIC_ONLY_DATA_BT ((ctucan_bt_t){ .brp = 1, .prop = 3, .ph1 = 3, .ph2 = 3, .sjw = 1 })
+
 static int set_timing(drv_t *d, const CAN_DEVCTL_TIMING *t)
 {
     unsigned ts1 = t->time_segment_1, ts2 = t->time_segment_2;
@@ -1108,7 +1113,7 @@ static int set_timing(drv_t *d, const CAN_DEVCTL_TIMING *t)
         if (d->fd) {
             return EINVAL;  /* the data phase must still work at the new clock */
         }
-        data = bt;          /* classic only (-C): BTR_FD is written but never used */
+        data = CLASSIC_ONLY_DATA_BT;    /* classic only (-C): BTR_FD is written but never used */
     }
     d->clk_hz = clk;
     d->cfg.nominal = bt;
@@ -1421,7 +1426,7 @@ static int parse_args(drv_t *d, int argc, char *argv[])
         return EINVAL;
     }
     if (drc != EOK) {
-        d->cfg.data = d->cfg.nominal;   /* classic only (-C): BTR_FD is written but never used */
+        d->cfg.data = CLASSIC_ONLY_DATA_BT;     /* classic only (-C): BTR_FD is written but never used */
     }
     return EOK;
 }
