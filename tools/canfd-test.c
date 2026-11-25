@@ -476,6 +476,11 @@ static int do_monitor(int fd, unsigned ms)
             worst = dt;     /* only devctls during the traffic */
         }
     }
+    if (samples == 0) {
+        free(vals);
+        fprintf(stderr, "monitor: no sample in %u ms\n", ms);
+        return EINVAL;
+    }
     unsigned first = vals[0], last = vals[samples - 1], between = 0, steps = 0;
     for (unsigned i = 0; i < samples; i++) {
         if (vals[i] > first && vals[i] < last) {

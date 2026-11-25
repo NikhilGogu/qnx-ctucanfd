@@ -5,7 +5,7 @@
  * tools/canfd-test.c on the host: its main() with devctl() answered by a
  * script, so the commands that decide a QNX test run can be tried with
  * replies the real driver gives only by chance (a deferred restart that
- * failed).
+ * failed, no sample in the monitor window).
  */
 #include <errno.h>
 #include <fcntl.h>
@@ -110,8 +110,20 @@ static void test_timing_reports_failed_restart(void)
     CHECK_EQ(run_tool(7, argv), 0);
 }
 
+static void test_monitor_no_sample(void)
+{
+    char *argv0[] = { "canfd-test", "monitor", "/dev/null", "0", NULL };
+    char *argv1[] = { "canfd-test", "monitor", "/dev/null", "20", NULL };
+
+    memset(&fk, 0, sizeof(fk));
+    CHECK(run_tool(4, argv0) != 0, "monitor with a zero window reported success");
+    memset(&fk, 0, sizeof(fk));
+    CHECK_EQ(run_tool(4, argv1), 0);
+}
+
 int main(void)
 {
     test_timing_reports_failed_restart();
+    test_monitor_no_sample();
     return check_exit("test_canfd_tool");
 }
