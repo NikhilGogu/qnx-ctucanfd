@@ -372,8 +372,8 @@ static int do_timing(int fd, const CAN_DEVCTL_TIMING *t)
     }
     int rc = devctl(fd, CAN_DEVCTL_SET_TIMING, (void *)t, sizeof(*t), NULL);
     printf("CAN_DEVCTL_SET_TIMING: %s\n", strerror(rc));
-    if (rc != EOK || !have_base) {
-        return rc;      /* without a count from before, a later one proves nothing */
+    if (rc != EOK) {
+        return rc;
     }
     if ((xr = devctl(fd, CTUCAN_DEVCTL_GET_XSTATS, &x, sizeof(x), NULL)) != EOK) {
         fprintf(stderr, "CTUCAN_DEVCTL_GET_XSTATS: %s\n", strerror(xr));
@@ -391,8 +391,9 @@ static int do_timing(int fd, const CAN_DEVCTL_TIMING *t)
         printf("restart deferred, still pending after 2 s\n");
         return ETIMEDOUT;
     }
-    /* the restart may have run, and failed, before the first read above */
-    rc = x.restart_fail != fails ? ETIMEDOUT : EOK;
+    /* the restart may have run, and failed, before the first read above;
+     * without a count from before, a later one proves nothing */
+    rc = have_base && x.restart_fail != fails ? ETIMEDOUT : EOK;
     if (deferred || rc != EOK) {
         printf("restart deferred until the TXT buffers were done: %s\n", strerror(rc));
     }

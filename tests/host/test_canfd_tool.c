@@ -31,6 +31,7 @@ int MsgSendPulse(int coid, int priority, int code, int value)
 static struct {
     unsigned xstats_calls;
     unsigned fail_xstats_from;      /* XSTATS call number (1 based) that fails; 0 = none */
+    unsigned fail_xstats_only;      /* the one XSTATS call number (1 based) that fails; 0 = none */
     uint32_t fail_after_set;        /* restart_fail value seen after SET_TIMING */
     uint32_t state_after_set;       /* state word seen after SET_TIMING */
     int      set_timing_rc;
@@ -57,6 +58,9 @@ int devctl(int fd, int dcmd, void *data, size_t nbytes, int *info)
         ctucan_xstats_t *x = data;
         fk.xstats_calls++;
         if (fk.fail_xstats_from != 0 && fk.xstats_calls >= fk.fail_xstats_from) {
+            return EIO;
+        }
+        if (fk.fail_xstats_only != 0 && fk.xstats_calls == fk.fail_xstats_only) {
             return EIO;
         }
         memset(x, 0, sizeof(*x));
@@ -146,9 +150,22 @@ static void test_timing_reports_failed_restart(void)
 
     /* the stats read before SET_TIMING fails: no baseline, so no claim either way */
     memset(&fk, 0, sizeof(fk));
-    fk.fail_xstats_from = 1;
+    fk.fail_xstats_only = 1;
     fk.fail_after_set = 1;
     CHECK_EQ(run_tool(7, argv), 0);
+
+    /* every stats read fails: the restart cannot be checked, so the tool says so */
+    memset(&fk, 0, sizeof(fk));
+    fk.fail_xstats_from = 1;
+    CHECK(run_tool(7, argv) != 0, "a tool that could read no stats reported success");
+
+    /* only the read before SET_TIMING fails and the restart never ends: the pending
+     * flag still has to be polled, and the tool reports the timeout */
+    memset(&fk, 0, sizeof(fk));
+    fk.fail_xstats_only = 1;
+    fk.state_after_set = 1u << 11;
+    CHECK(run_tool(7, argv) != 0, "a restart pending for good was reported as success after a failed first read");
+    CHECK(fk.xstats_calls > 2, "the pending flag was not polled after a failed first read");
 }
 
 static void test_monitor_no_sample(void)
