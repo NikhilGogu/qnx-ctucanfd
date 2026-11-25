@@ -243,6 +243,25 @@ static void test_tester_empty_run(void)
     CHECK_EQ(fk.frames_written, 0);
 }
 
+/* timing values are narrowed to 16 and 8 bits: 262 must not become 6 on its way to the driver */
+static void test_timing_numbers(void)
+{
+    char *ts2[] = { "canfd-test", "timing", "/dev/null", "4", "43", "262", "4", NULL };
+    char *brp[] = { "canfd-test", "timing", "/dev/null", "65540", "43", "6", "4", NULL };
+    char *junk[] = { "canfd-test", "timing", "/dev/null", "4", "43x", "6", "4", NULL };
+    char *neg[] = { "canfd-test", "timing", "/dev/null", "4", "43", "6", "-1", NULL };
+    char *ok[] = { "canfd-test", "timing", "/dev/null", "65535", "255", "255", "0x4", NULL };
+
+    memset(&fk, 0, sizeof(fk));
+    CHECK(run_tool(7, ts2) != 0, "TS2 262 was accepted");
+    CHECK(run_tool(7, brp) != 0, "prescaler 65540 was accepted");
+    CHECK(run_tool(7, junk) != 0, "TS1 43x was accepted");
+    CHECK(run_tool(7, neg) != 0, "SJW -1 was accepted");
+    CHECK_EQ(fk.set_timing_calls, 0);
+    CHECK_EQ(run_tool(7, ok), 0);
+    CHECK_EQ(fk.set_timing_calls, 1);
+}
+
 int main(void)
 {
     test_timing_reports_failed_restart();
@@ -252,5 +271,6 @@ int main(void)
     test_info_queries();
     test_seqsend_length();
     test_tester_empty_run();
+    test_timing_numbers();
     return check_exit("test_canfd_tool");
 }

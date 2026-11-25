@@ -30,6 +30,8 @@
  * (i >= 4) holds (seq + i) & 0xff. Both seqsend and the host test scripts use
  * this layout, so every byte of every frame is checked.
  */
+#include <ctype.h>
+#include <limits.h>
 #include <devctl.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -748,8 +750,19 @@ int main(int argc, char *argv[])
         rc = devctl(fd, CTUCAN_DEVCTL_RECOVER, NULL, 0, NULL);
         printf("CTUCAN_DEVCTL_RECOVER: %s\n", strerror(rc));
     } else if (strcmp(cmd, "timing") == 0 && argc > 6) {
-        CAN_DEVCTL_TIMING t = { 0, (uint16_t)strtoul(argv[3], NULL, 0), (uint8_t)strtoul(argv[6], NULL, 0),
-                                (uint8_t)strtoul(argv[4], NULL, 0), (uint8_t)strtoul(argv[5], NULL, 0) };
+        unsigned long v[4];
+        static const unsigned long vmax[4] = { 0xffffu, 0xffu, 0xffu, 0xffu };
+        for (int i = 0; i < 4; i++) {
+            char *end;
+            errno = 0;
+            v[i] = isalnum((unsigned char)argv[3 + i][0]) ? strtoul(argv[3 + i], &end, 0) : ULONG_MAX;
+            if (errno != 0 || v[i] > vmax[i] || *end != '\0') {
+                fprintf(stderr, "canfd-test timing: argument %d is not a number in range\n", 3 + i);
+                close(fd);
+                return 1;
+            }
+        }
+        CAN_DEVCTL_TIMING t = { 0, (uint16_t)v[0], (uint8_t)v[3], (uint8_t)v[1], (uint8_t)v[2] };
         rc = do_timing(fd, &t);
     } else if (strcmp(cmd, "fi") == 0 && argc > 3) {
         ctucan_fi_req_t r = { (uint32_t)strtoul(argv[3], NULL, 0),
