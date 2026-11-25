@@ -35,6 +35,8 @@ typedef struct {
     uint32_t int_ena;
     uint32_t int_storm;                     /* INT_STAT bits set again as soon as they are cleared */
     uint32_t device_id;                     /* what DEVICE_ID reads */
+    uint32_t mode_reset;                    /* MODE/SETTINGS after power-on and soft reset; fake_init() sets
+                                             * MODE_FDE, the value QEMU 6.2 shows */
     bool     reset_stuck;                   /* a soft reset never completes */
     bool     posted;                        /* writes land at the next read, as PCI allows */
     bool     abort_slow;                    /* an abort leaves the buffer "abort in progress" (TXT_ABTP) */
@@ -49,6 +51,18 @@ typedef struct {
 } fake_core_t;
 
 extern fake_core_t fake;
+
+/* Set by a test before it starts the driver, and kept by fake_init(). While true: the soft reset value
+ * of MODE/SETTINGS has TBFBO = 1; writing SETTINGS.ENA makes FAULT_STATE read bus-off (the core is
+ * integrating) until the test writes error active; and a Set ready command while FAULT_STATE reads
+ * bus-off with TBFBO = 1 moves the TXT buffer to Aborted (datasheet 2.9.7, note). While false the core
+ * behaves as before: FAULT_STATE reads what fake_fault_reset says. */
+extern bool fake_integrate;
+
+/* What FAULT_STATE (with the warning limit in its low bits) reads after a soft reset. Kept by fake_init(),
+ * like fake_integrate. Default 0: none of error active, error passive and bus-off, as QEMU 6.2 reads it
+ * (docs/DESIGN.md, section 1). A test may set FS_ERA | 96 or FS_ERP | 96 before it starts the driver. */
+extern uint32_t fake_fault_reset;
 
 /* Power-on state: reset values, empty FIFO, four empty TXT buffers. */
 void fake_init(ctucan_hw_t *hw);

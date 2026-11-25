@@ -264,9 +264,62 @@ static void body_busoff_auto(void)
     CHECK_EQ(ercrst_writes(), 1);
 }
 
+/* FAULT_STATE reads bus-off before the FCSI that shows it is serviced: a TXBHCI
+ * pass and client writes come first. No Set ready must go out in that time;
+ * then the FCSI pass does the usual bus-off work, and after recovery the
+ * queued frames go in order. */
+static unsigned tx_cmd_writes(void)
+{
+    return fake_write_count(CTUCAN_TX_COMMAND);
+}
+
+static void body_busoff_before_fcsi(void)
+{
+    fake.mem[CTUCAN_EWL_ERP_FAULT / 4] = FS_BOF | 96u;     /* bus-off, and no FCSI pending yet */
+    fake.mem[CTUCAN_REC_TEC / 4] = 256u << 16;
+    for (unsigned i = 0; i < 2; i++) {
+        CAN_MSG m = frame(0x400 + i, 8);
+        CHECK_EQ(fake_write(TX1, &m), 0);
+    }
+    CHECK_EQ(tx_cmd_writes(), 0);
+    CHECK_EQ(lc.dev[TX1]->msg_queue->msgcnt, 2);
+    CHECK_EQ(xstats().state & 0xffu, 0);
+
+    irq(INT_TXBHCI);            /* TX interrupt first, as two separate interrupts */
+    fake_pulse();
+    CHECK_EQ(tx_cmd_writes(), 0);
+    CHECK_EQ(lc.dev[TX1]->msg_queue->msgcnt, 2);
+    CHECK(!busoff_hold(), "no bus-off seen yet");
+    CHECK_EQ(stats().bus_off_state_count, 0);
+    for (unsigned b = 0; b < CTUCAN_TXT_BUFFERS; b++) {
+        CHECK(fake.txt[b] != TXT_RDY && fake.txt[b] != TXT_ABT, "buffer %u used while bus-off", b);
+    }
+
+    irq(INT_FCSI);              /* now the FCSI: the usual bus-off handling */
+    fake_pulse();
+    CHECK(busoff_hold(), "hold set at the FCSI");
+    CHECK_EQ(stats().bus_off_state_count, 1);
+    CHECK_EQ(xstats().tx_aborted, 0);
+    CHECK_EQ(tx_cmd_writes(), 0);
+    CHECK_EQ(lc.dev[TX1]->msg_queue->msgcnt, 2);
+
+    set_fault(FS_ERA, 0);
+    fake_pulse();
+    CHECK(!busoff_hold(), "hold released at error active");
+    CHECK_EQ(xstats().busoff_recovered, 1);
+    CHECK_EQ(stats().bus_off_state_count, 1);
+    CHECK_EQ(lc.dev[TX1]->msg_queue->msgcnt, 0);
+    CHECK_EQ(tx_cmd_writes(), 1);
+    CHECK_EQ(txt_id(0), 0x400);
+    CHECK_EQ(txt_id(1), 0x401);
+    CHECK_EQ(fake.txt[0], TXT_RDY);
+    CHECK_EQ(fake.txt[1], TXT_RDY);
+}
+
 static void test_busoff(void)
 {
     CHECK_EQ(run("", body_busoff), 0);
+    CHECK_EQ(run("", body_busoff_before_fcsi), 0);
     CHECK_EQ(run("-a", body_busoff_auto), 0);
 }
 
@@ -649,7 +702,7 @@ static void body_devctl(void)
     CHECK_EQ(dc(RX0, CAN_DEVCTL_DEBUG_INFO, NULL, 0, 0), 0);
     CHECK_EQ(lc.slog_lines - lines, dump);
     CHECK_EQ(dc(RX0, CAN_DEVCTL_ERROR, &d, 0, sizeof(d.error)), sizeof(d.error));
-    CHECK_EQ(d.error.drvr1 & FS_MASK, FS_ERA);
+    CHECK_EQ(d.error.drvr1 & FS_MASK, 0);    /* the fake core reads FAULT_STATE 0, as QEMU 6.2 does */
     CHECK(dc(RX0, CTUCAN_DEVCTL_FI, &fi, sizeof(fi), 0) == -1 && errno == ENOTSUP, "FI on a normal build");
     CHECK(dc(RX0, CTUCAN_DEVCTL_FI_TICK, NULL, 0, 0) == -1 && errno == ENOTSUP, "FI_TICK on a normal build");
     CHECK(dc(RX0, __DION(_DCMD_MISC, 99), NULL, 0, 0) == -1 && errno == ENOTSUP, "unknown command");

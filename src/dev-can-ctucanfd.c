@@ -129,6 +129,8 @@ struct drv {
     uint32_t fs;                    /* last FAULT_STATE bits */
     bool     ewl;                   /* last STATUS.EWL, tracked apart from FAULT_STATE */
     bool     busoff_hold;           /* set at bus-off, cleared only by FAULT_STATE = error active */
+    bool     integ_hold;            /* the core is still integrating after ENA: no Set ready until error active */
+    uint32_t integ_holds;           /* times it was set (ctucan_xstats_t is full: slog2 and the register dump only) */
 
     uint32_t         ts_offset;     /* timestamps: ctucanfd_time.h */
     uint64_t         dump_ms;       /* last register dump (DEBUG_INFO), now_ms() */
@@ -181,8 +183,55 @@ static unsigned tx_inflight(const drv_t *d)
 
 static bool tx_admit(const drv_t *d)
 {
-    return d->hw_started && !d->tx_stopped && !d->busoff_hold && d->txw == TXW_IDLE;
+    return d->hw_started && !d->tx_stopped && !d->busoff_hold && !d->integ_hold && d->txw == TXW_IDLE;
 }
+
+/* After ENA the core is bus-off while it integrates into the bus. A Set ready
+ * command in that time sends the TXT buffer to "Aborted" at once when
+ * SETTINGS.TBFBO = 1 (datasheet 2.9.7, note), and the driver sets TBFBO. So
+ * after every ctucan_hw_start() (d->fs is the FAULT_STATE read that follows
+ * it) TX is held when that read says bus-off, until the core reads error
+ * active. Any other reading sets nothing: QEMU 6.2 reads 0 (none of the
+ * three), and error passive is no integration. This is apart from
+ * busoff_hold: it is no bus-off event, so the bus-off counters and lines stay
+ * true. Frames stay queued in libcan meanwhile. */
+static void integ_hold_begin(drv_t *d)
+{
+    d->integ_hold = (d->fs & FS_BOF) != 0;
+    if (d->integ_hold) {
+        d->integ_holds++;
+        can_slogf(SLOG2_INFO, DRV_NAME ": core reads bus-off after enable (still integrating): TX held");
+    }
+}
+
+static void integ_hold_end(drv_t *d, const char *how)
+{
+    d->integ_hold = false;
+    can_slogf(SLOG2_INFO, DRV_NAME ": core error active (%s): TX released", how);
+}
+
+#define FS_UNREAD 0xffffffffu   /* integ_hold_poll() did not read FAULT_STATE */
+
+/* The way out for a core that raises no FCSI when integration ends: where TX
+ * would be admitted, FAULT_STATE is read once and the hold ends if it reads
+ * error active. d->fs follows, so the next real change is seen as one.
+ * Returns the FAULT_STATE bits it read, or FS_UNREAD, so tx_kick() reads
+ * the register once and not twice. */
+static uint32_t integ_hold_poll(drv_t *d)
+{
+    uint32_t fs = FS_UNREAD;
+
+    if (d->integ_hold && d->hw_started && !d->tx_stopped && !d->busoff_hold && d->txw == TXW_IDLE) {
+        fs = ctucan_rd(&d->hw, CTUCAN_EWL_ERP_FAULT) & FS_MASK;
+        if (fs & FS_ERA) {
+            d->fs = fs;
+            integ_hold_end(d, "polled");
+        }
+    }
+    return fs;
+}
+
+static unsigned tx_queued(const drv_t *d);
 
 static void tx_set_prio(drv_t *d)
 {
@@ -210,11 +259,30 @@ static canmsg_t *tx_dequeue(drv_t *d, mbox_t **from)
     return NULL;
 }
 
+/* Before a Set ready command FAULT_STATE is read once. A core that reads
+ * bus-off gets no frame in this kick: they stay queued in libcan, and
+ * d->fs, busoff_hold and the counters are left alone, so the FCSI that
+ * follows is still seen as the change and error_event() does all the usual
+ * bus-off work. This closes the case where TXBHCI or a client write is
+ * handled before that FCSI. An idle kick (TX not admitted, nothing queued or
+ * no free buffer) reads nothing. A reading without bus-off, QEMU 6.2's 0
+ * among them, changes nothing. Only the few register accesses between this
+ * read and the command remain, and no driver can close those. */
 static void tx_kick(drv_t *d)
 {
     unsigned ready = 0;
     uint64_t t_ready = 0;
+    uint32_t fs = integ_hold_poll(d);
 
+    if (!tx_admit(d) || tx_inflight(d) >= d->ntxb || tx_queued(d) == 0) {
+        return;
+    }
+    if (fs == FS_UNREAD) {
+        fs = ctucan_rd(&d->hw, CTUCAN_EWL_ERP_FAULT) & FS_MASK;
+    }
+    if (fs & FS_BOF) {
+        return;
+    }
     while (tx_admit(d) && tx_inflight(d) < d->ntxb) {
         unsigned b = d->txb_head;
         if (!ctucan_txt_writable(ctucan_hw_txt_state(&d->hw, b))) {
@@ -340,7 +408,8 @@ static unsigned tx_retire(drv_t *d)
             d->stats.transmitted_frames++;
             d->x.tx_ok++;
             break;
-        case TXT_ERR:   /* no retransmission limit is set: bus-off, on cores that fail buffers then */
+        case TXT_ERR:   /* TX failed: bus-off with SETTINGS.TBFBO = 1, the retransmission limit (-R), or a
+                         * mode that cannot send (bus monitoring) */
         case TXT_PER:
             d->x.tx_failed++;
             d->stats.total_frame_errors++;
@@ -647,6 +716,9 @@ static void error_event(drv_t *d, uint32_t st)
                 d->busoff_hold = false;
                 d->x.busoff_recovered++;
                 can_slogf(SLOG2_WARNING, DRV_NAME ": bus-off recovery confirmed, TX resumes");
+            }
+            if (d->integ_hold) {
+                integ_hold_end(d, "FCSI");  /* not counted as a bus-off recovery */
             }
         }
         /* any other value (none of the three bits) leaves a bus-off hold in place */
@@ -977,6 +1049,7 @@ static int restart_now(drv_t *d)
     d->fs = ctucan_rd(&d->hw, CTUCAN_EWL_ERP_FAULT) & FS_MASK;
     d->ewl = (ctucan_rd(&d->hw, CTUCAN_STATUS) & STAT_EWL) != 0;
     d->busoff_hold = false;     /* the reset clears the error counters */
+    integ_hold_begin(d);        /* the core integrates into the bus again */
     d->hw_started = true;       /* only now: the core is out of reset and set up again */
     d->x.restarts++;
     tx_kick(d);
@@ -1059,8 +1132,9 @@ static void dump_regs(const drv_t *d)
         can_slogf(SLOG2_INFO, DRV_NAME ": %-12s 0x%08x", regs[i].name, ctucan_rd(&d->hw, regs[i].off));
     }
     can_slogf(SLOG2_INFO, DRV_NAME ": pulses %u, deferred %u, unmask_err %u, in flight %u, bus-off hold %d, "
-              "TX wait %d, restart pending %d, slow TX %u", d->x.hw_pulses, d->x.deferred, d->x.unmask_err,
-              tx_inflight(d), d->busoff_hold, (int)d->txw, d->restart_pending, d->tx_slow);
+              "TX wait %d, restart pending %d, slow TX %u, integration hold %d (set %u times)", d->x.hw_pulses,
+              d->x.deferred, d->x.unmask_err, tx_inflight(d), d->busoff_hold, (int)d->txw, d->restart_pending,
+              d->tx_slow, d->integ_hold, d->integ_holds);
 }
 
 static int cb_devctl(CANDEV *cdev, io_devctl_t *msg)
@@ -1179,7 +1253,8 @@ static int cb_devctl(CANDEV *cdev, io_devctl_t *msg)
         break;
     case CTUCAN_DEVCTL_GET_XSTATS:
         d->x.state = d->fs | (d->restart_pending ? 1u << 11 : 0) | (d->txw != TXW_IDLE ? 1u << 10 : 0) |
-                     (d->busoff_hold ? 1u << 9 : 0) | (d->ewl ? 1u << 8 : 0) | (tx_inflight(d) & 0xffu);
+                     (d->busoff_hold ? 1u << 9 : 0) | (d->integ_hold ? 1u << 12 : 0) | (d->ewl ? 1u << 8 : 0) |
+                     (tx_inflight(d) & 0xffu);
 #ifdef CTUCAN_FI
         d->x.state |= (ctucan_fi_state(d->hw.fi) & 0xffu) << 24;
 #endif
@@ -1579,6 +1654,7 @@ int main(int argc, char *argv[])
     tx_set_prio(d);
     d->fs = ctucan_rd(&d->hw, CTUCAN_EWL_ERP_FAULT) & FS_MASK;
     d->ewl = (ctucan_rd(&d->hw, CTUCAN_STATUS) & STAT_EWL) != 0;
+    integ_hold_begin(d);
     d->hw_started = true;
 
     printf(DRV_NAME ": CTU CAN FD %u.%u, /dev/can%u/rx0..rx%u tx%u..tx%u, %s, %u bit/s (brp %u tq %u)",
