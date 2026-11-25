@@ -186,6 +186,7 @@ static void test_send_id(void)
     char *over_x[] = { "canfd-test", "send", "/dev/null", "ffffffffx", "1", NULL };
     char *top[] = { "canfd-test", "send", "/dev/null", "1fffffff", "1", NULL };
     char *std[] = { "canfd-test", "send", "/dev/null", "7ff", "1", NULL };
+    char *readme[] = { "canfd-test", "send", "/dev/null", "1ABCDEF0x", "8", NULL };   /* README: 29-bit id, suffix x */
 
     memset(&fk, 0, sizeof(fk));
     CHECK(run_tool(5, over) != 0, "id 0x20000000 was accepted");
@@ -193,7 +194,8 @@ static void test_send_id(void)
     CHECK_EQ(fk.frames_written, 0);
     CHECK_EQ(run_tool(5, top), 0);
     CHECK_EQ(run_tool(5, std), 0);
-    CHECK_EQ(fk.frames_written, 2);
+    CHECK_EQ(run_tool(5, readme), 0);
+    CHECK_EQ(fk.frames_written, 3);
 }
 
 /* a short write(2) has no errno of its own; the tool must not report the leftover one */
