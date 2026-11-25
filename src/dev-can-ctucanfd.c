@@ -1105,7 +1105,10 @@ static int set_timing(drv_t *d, const CAN_DEVCTL_TIMING *t)
     }
     data = d->cfg.data;
     if (clk != d->clk_hz && ctucan_bt_calc(clk, d->dbitrate, d->dsp, true, &data) != EOK) {
-        return EINVAL;  /* the data phase must still work at the new clock */
+        if (d->fd) {
+            return EINVAL;  /* the data phase must still work at the new clock */
+        }
+        data = bt;          /* classic only (-C): BTR_FD is written but never used */
     }
     d->clk_hz = clk;
     d->cfg.nominal = bt;
@@ -1392,11 +1395,14 @@ static int parse_args(drv_t *d, int argc, char *argv[])
         d->unit = d->core + 1;
     }
     d->cfg.fd = d->fd;
-    if (ctucan_bt_calc(d->clk_hz, d->bitrate, d->sp, false, &d->cfg.nominal) != EOK ||
-        ctucan_bt_calc(d->clk_hz, d->dbitrate, d->dsp, true, &d->cfg.data) != EOK) {
+    int drc = ctucan_bt_calc(d->clk_hz, d->dbitrate, d->dsp, true, &d->cfg.data);
+    if (ctucan_bt_calc(d->clk_hz, d->bitrate, d->sp, false, &d->cfg.nominal) != EOK || (d->fd && drc != EOK)) {
         fprintf(stderr, DRV_NAME ": no bit timing for %u/%u bit/s at %u Hz\n", d->bitrate, d->dbitrate,
                 d->clk_hz);
         return EINVAL;
+    }
+    if (drc != EOK) {
+        d->cfg.data = d->cfg.nominal;   /* classic only (-C): BTR_FD is written but never used */
     }
     return EOK;
 }

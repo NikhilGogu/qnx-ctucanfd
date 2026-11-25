@@ -1139,9 +1139,38 @@ static void test_identify_fail(void)
           fake.nlog, fake.nlog > 0 ? fake.log[0].off : 0u);
 }
 
+/* ---- classic CAN only: the data phase timing is not needed ---------------- */
+
+/* 8 MHz and 500 kbit/s nominal is 16 time quanta, which is fine. The default
+ * 2 Mbit/s data rate would be 4 quanta, which no CAN FD timing can use, but
+ * with -C the data phase is never on. */
+static bool g_classic_body_ran;
+
+static void body_classic_8mhz(void)
+{
+    g_classic_body_ran = true;
+    CHECK_EQ(fake.mem[CTUCAN_MODE / 4] & (SET_ENA | MODE_FDE), SET_ENA);    /* on the bus, FD off */
+    CHECK_EQ((fake.mem[CTUCAN_BTR / 4] >> BTR_BRP_SHIFT) & 0xffu, 1);
+
+    /* a new reference clock needs no data phase either */
+    CAN_DEVCTL_TIMING t = { .ref_clock_freq = 8000000u, .bit_rate_prescaler = 1, .sync_jump_width = 2,
+                            .time_segment_1 = 13, .time_segment_2 = 2 };
+    CHECK_EQ(dc(RX0, CAN_DEVCTL_SET_TIMING, &t, sizeof(t), 0), 0);
+    CHECK_EQ(xstats().restarts, 1);
+}
+
+static void test_classic_only_timing(void)
+{
+    g_classic_body_ran = false;
+    CHECK_EQ(run("-C -k 8000000 -b 500000", body_classic_8mhz), 0);
+    CHECK(g_classic_body_ran, "a classic-only start at 8 MHz, 500 kbit/s was refused");
+    CHECK_EQ(g_drv.bitrate, 500000);
+}
+
 int main(void)
 {
     test_identify_fail();
+    test_classic_only_timing();
     test_start_stop();
     test_tx_ring();
     test_tx_wrap();
