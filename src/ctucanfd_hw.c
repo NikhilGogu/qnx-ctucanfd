@@ -96,12 +96,14 @@ void ctucan_hw_start(const ctucan_hw_t *hw, const ctucan_hw_cfg_t *cfg, uint32_t
     }
     /* Mode and settings are written while the core is still off the bus, and
      * only a second write sets ENA, so the core never joins the bus with a
-     * configuration it has not taken yet. The word is read first: RXBAM and
-     * TBFBO reset to 1, and a write built from zero would clear them (RX
-     * would stay in manual mode and the TXT buffers would not fail at
-     * bus-off). Only the owned bits change. */
+     * configuration it has not taken yet. RXBAM and TBFBO are set in both
+     * writes, whatever the core held: with RXBAM = 0 a read of RX_DATA would
+     * not take the word out of the FIFO, and with TBFBO = 0 the TXT buffers
+     * would not fail at bus-off. The word is read first, so that the bits
+     * that depend on the core build stay as they are. */
     uint32_t cur = ctucan_rd(hw, CTUCAN_MODE) & ~(CTUCAN_MODE_OWNED | MODE_RST);
 
+    mode |= CTUCAN_MODE_ALWAYS;
     ctucan_wr(hw, CTUCAN_MODE, cur | mode);
     ctucan_wr(hw, CTUCAN_MODE, cur | mode | SET_ENA);
     ctucan_wr(hw, CTUCAN_INT_ENA_SET, int_ena);

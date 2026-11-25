@@ -2,11 +2,12 @@
  * Copyright 2026 The ctucanfd authors
  * SPDX-License-Identifier: Apache-2.0
  *
- * MODE and SETTINGS are one word, and some of its bits are not the driver's:
- * MODE[RXBAM] and SETTINGS[TBFBO] reset to 1 (datasheet 3.1.3, 3.1.4). The
- * fake core here starts at the datasheet reset value, so that start, stop and
- * a soft reset followed by start must keep both. QEMU 6.2 ignores both bits,
- * which is why no other test sees a write that clears them.
+ * MODE and SETTINGS are one word. The driver needs MODE[RXBAM] and
+ * SETTINGS[TBFBO] at 1 (reset value 1, datasheet 3.1.3, 3.1.4): start sets
+ * both in every write, also on a core that held them at 0, and stop keeps
+ * them. The bits that depend on the core build are kept as the core has them.
+ * QEMU 6.2 ignores RXBAM and TBFBO, which is why no other test sees a write
+ * that clears them.
  */
 #include "check.h"
 #include "fake_core.h"
@@ -53,6 +54,20 @@ static void test_start_keeps_reset_bits(void)
     CHECK_EQ(fake.mem[CTUCAN_MODE / 4] & SET_TBFBO, SET_TBFBO);       /* buffers fail at bus-off */
     CHECK_EQ(fake.mem[CTUCAN_MODE / 4] & (MODE_FDE | SET_ENA), MODE_FDE | SET_ENA);
     check_all_mode_writes(KEEP_RESET, "start");
+}
+
+/* A core that other software left with RXBAM and TBFBO at 0: start sets both,
+ * in the write before ENA and in the write that sets ENA. */
+static void test_start_sets_cleared_bits(void)
+{
+    ctucan_hw_cfg_t cfg;
+
+    cfg_default(&cfg);
+    fake_init(&hw);
+    fake.mem[CTUCAN_MODE / 4] = MODE_FDE | ERFM;    /* both bits 0 */
+    ctucan_hw_start(&hw, &cfg, INT_RBNEI);
+    CHECK_EQ(fake.mem[CTUCAN_MODE / 4], MODE_FDE | ERFM | KEEP_RESET | SET_ENA);
+    check_all_mode_writes(KEEP_RESET | ERFM, "start, bits were 0");
 }
 
 /* Bits that the build parameters decide (reset X) are kept as the core has them. */
@@ -149,6 +164,7 @@ static void test_restart_sequence(void)
 int main(void)
 {
     test_start_keeps_reset_bits();
+    test_start_sets_cleared_bits();
     test_start_keeps_other_bits();
     test_owned_bits_follow_cfg();
     test_stop_keeps_reset_bits();

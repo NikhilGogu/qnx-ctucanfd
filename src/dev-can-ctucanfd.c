@@ -188,7 +188,7 @@ static bool tx_admit(const drv_t *d)
 
 /* After ENA the core is bus-off while it integrates into the bus. A Set ready
  * command in that time sends the TXT buffer to "Aborted" at once when
- * SETTINGS.TBFBO = 1 (datasheet 2.9.7, note), and the driver keeps TBFBO. So
+ * SETTINGS.TBFBO = 1 (datasheet 2.9.7, note), and the driver sets TBFBO. So
  * after every ctucan_hw_start() (d->fs is the FAULT_STATE read that follows
  * it) TX is held when that read says bus-off, until the core reads error
  * active. Any other reading sets nothing: QEMU 6.2 reads 0 (none of the
