@@ -217,8 +217,9 @@ static int do_seqsend(int fd, int argc, char *argv[])
     unsigned count = (unsigned)strtoul(argv[5], NULL, 0);
     unsigned gap = (unsigned)strtoul(argv[6], NULL, 0);
     unsigned long retries = 0;
-    if (len < 4 || len > CAN_MSG_DATA_MAX) {
-        return EINVAL;
+    if (len < 4 || len > CAN_MSG_DATA_MAX || (len > 8 && len != 12 && len != 16 && len != 20 && len != 24 &&
+                                              len != 32 && len != 48 && len != 64)) {
+        return EINVAL;      /* the frame on the bus carries a length that has a DLC; seqrecv checks all of it */
     }
     m.len = (uint8_t)len;
     uint64_t t0 = mono_us(), next = t0;

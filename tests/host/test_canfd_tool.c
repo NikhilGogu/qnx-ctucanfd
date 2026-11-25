@@ -199,6 +199,26 @@ static void test_info_queries(void)
     CHECK(run_tool(3, argv) != 0, "info reported success with the error query failing");
 }
 
+/* a sequenced frame is sent with its length as given; the core pads a length that has no DLC,
+ * so the receiver would see zeros where the sender's pattern continues */
+static void test_seqsend_length(void)
+{
+    char *bad[] = { "canfd-test", "seqsend", "/dev/null", "100", "9", "2", "0", NULL };
+    char *bad2[] = { "canfd-test", "seqsend", "/dev/null", "100", "13", "2", "0", NULL };
+    char *ok8[] = { "canfd-test", "seqsend", "/dev/null", "100", "8", "2", "0", NULL };
+    char *ok12[] = { "canfd-test", "seqsend", "/dev/null", "100", "12", "2", "0", NULL };
+    char *ok64[] = { "canfd-test", "seqsend", "/dev/null", "100", "64", "2", "0", NULL };
+
+    memset(&fk, 0, sizeof(fk));
+    CHECK(run_tool(7, bad) != 0, "a 9 byte sequenced frame was sent");
+    CHECK(run_tool(7, bad2) != 0, "a 13 byte sequenced frame was sent");
+    CHECK_EQ(fk.frames_written, 0);
+    CHECK_EQ(run_tool(7, ok8), 0);
+    CHECK_EQ(run_tool(7, ok12), 0);
+    CHECK_EQ(run_tool(7, ok64), 0);
+    CHECK_EQ(fk.frames_written, 6);
+}
+
 int main(void)
 {
     test_timing_reports_failed_restart();
@@ -206,5 +226,6 @@ int main(void)
     test_send_id();
     test_write_short();
     test_info_queries();
+    test_seqsend_length();
     return check_exit("test_canfd_tool");
 }
