@@ -23,7 +23,11 @@ make -s -C "$D" && make -s -C "$D" FI=1 || { echo "FAIL: build"; exit 2; }
 "$Q" "$TGT" ssh "uname -a"
 [ -z "$PEER" ] || "$Q" "$PEER" ssh "uname -a"
 rc=0
-"$D/scripts/gate-test.sh" "$TGT" "$IF" || rc=1
-"$D/scripts/tests/ctutest.py" --target "$TGT" --if "$IF" ${PEER:+--peer "$PEER"} ${JUNIT:+--junit "$JUNIT"} || rc=1
+gate=pass
+"$D/scripts/gate-test.sh" "$TGT" "$IF" || { rc=1; gate=FAIL; }
+echo "# gate-test.sh: $gate"
+# without a peer the skip of two_nodes is the intended one-target run; with a peer a skip fails the run
+ALLOW=; [ -n "$PEER" ] || ALLOW=--allow-skip
+"$D/scripts/tests/ctutest.py" --target "$TGT" --if "$IF" ${PEER:+--peer "$PEER"} $ALLOW ${JUNIT:+--junit "$JUNIT"} || rc=1
 echo "# results: $OUT, exit $rc"
 exit $rc

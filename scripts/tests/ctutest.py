@@ -1235,6 +1235,8 @@ def main():
     ap.add_argument("--peer", help="second target on the same host interface, for two_nodes")
     ap.add_argument("--if", dest="ifname", default="vcan0")
     ap.add_argument("--junit", metavar="FILE", help="also write the results as JUnit XML (no times)")
+    ap.add_argument("--allow-skip", action="store_true",
+                    help="a skipped case is expected (no --peer, so two_nodes skips): the exit status stays 0")
     ap.add_argument("--list", action="store_true")
     ap.add_argument("tests", nargs="*")
     a = ap.parse_args()
@@ -1244,11 +1246,12 @@ def main():
         for n in names:
             print(f"{n:20} {by_name[n].__doc__}")
         return 0
-    sel = a.tests or names
+    sel = list(dict.fromkeys(a.tests or names))     # a case named twice runs and counts once
     global PEER
     PEER = a.peer
     t, bus = Target(a.target), Bus(a.ifname)
     failed = skipped = 0
+    skipped_names = []
     results = []
     for n in sel:
         t0 = time.monotonic()
@@ -1258,6 +1261,7 @@ def main():
             results.append((n, "PASS", str(detail)))
         except Skip as e:
             skipped += 1
+            skipped_names.append(n)
             print(f"SKIP {n}: {e}", flush=True)
             results.append((n, "SKIP", str(e)))
         except (Fail, subprocess.TimeoutExpired, AttributeError, ValueError, IndexError) as e:
@@ -1269,8 +1273,9 @@ def main():
             f.write(junit_xml(results))
     print(f"deployed files checked by md5 on the target after copying: {len(Target.deployed)} "
           f"({', '.join(sorted(Target.deployed))})")
-    print(f"{len(sel) - failed - skipped} of {len(sel) - skipped} passed" + (f", {skipped} skipped" if skipped else ""))
-    return 1 if failed else 0
+    print(f"{len(sel) - failed - skipped} of {len(sel) - skipped} passed" + (f", {skipped} skipped ({', '.join(skipped_names)})" if skipped else ""))
+    # a skip is not a pass: it ends the run non-zero unless the caller said it was expected
+    return 1 if failed or (skipped and not a.allow_skip) else 0
 
 
 if __name__ == "__main__":
