@@ -10,6 +10,7 @@ import contextlib
 import io
 import os
 import sys
+import tempfile
 import unittest
 from unittest import mock
 
@@ -114,14 +115,11 @@ class MainTest(unittest.TestCase):
         self.assertEqual(rc, 0)
 
     def test_duplicates_in_the_junit_file(self):
-        path = os.path.join(os.environ.get("TMPDIR", "/tmp"), "ctutest-main-test.xml")
-        try:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "results.xml")
             self.run_main(["--junit", path, "alpha", "alpha"])
             with open(path) as f:
                 self.assertEqual(f.read().count("<testcase "), 1)
-        finally:
-            if os.path.exists(path):
-                os.remove(path)
 
 
 class SignatureMainTest(unittest.TestCase):
