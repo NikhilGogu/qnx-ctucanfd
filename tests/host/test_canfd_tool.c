@@ -166,10 +166,29 @@ static void test_send_id(void)
     CHECK_EQ(fk.frames_written, 2);
 }
 
+/* a short write(2) has no errno of its own; the tool must not report the leftover one */
+static void test_write_short(void)
+{
+    char *argv[] = { "canfd-test", "write", "/dev/null", "0102", NULL };
+
+    memset(&fk, 0, sizeof(fk));
+    fk.write_ret = 2;
+    CHECK_EQ(run_tool(4, argv), 0);
+    memset(&fk, 0, sizeof(fk));
+    fk.write_ret = 1;
+    errno = 0;
+    CHECK(run_tool(4, argv) != 0, "a short write was reported as success");
+    memset(&fk, 0, sizeof(fk));
+    fk.write_ret = -1;
+    fk.write_errno = EBUSY;
+    CHECK(run_tool(4, argv) != 0, "a failed write was reported as success");
+}
+
 int main(void)
 {
     test_timing_reports_failed_restart();
     test_monitor_no_sample();
     test_send_id();
+    test_write_short();
     return check_exit("test_canfd_tool");
 }

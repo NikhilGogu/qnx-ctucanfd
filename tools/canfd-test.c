@@ -161,9 +161,11 @@ static int do_write(int fd, const char *hex)
     if (n < 0) {
         return EINVAL;
     }
-    if (write(fd, buf, (size_t)n) != n) {
-        fprintf(stderr, "write: %s\n", strerror(errno));
-        return errno;
+    ssize_t w = write(fd, buf, (size_t)n);
+    if (w != n) {
+        int err = w == -1 && errno != 0 ? errno : EIO;     /* a short write sets no errno */
+        fprintf(stderr, "write: %s\n", strerror(err));
+        return err;
     }
     printf("wrote %d byte(s)\n", n);
     return EOK;
