@@ -101,8 +101,33 @@ static void test_period(void)
     CHECK(frames_written > 0, "no frame sent with valid options");
 }
 
+/* the telemetry id is an 11-bit id: it is shifted up 18 bits into the message id */
+static void test_id(void)
+{
+    char *big[] = { "-i", "800", "-n", "3" };
+    char *junk[] = { "-i", "18fz", "-n", "3" };
+    char *empty[] = { "-i", "", "-n", "3" };
+    char *top[] = { "-i", "7ff", "-p", "50000", "-n", "3" };
+    char *zero[] = { "-i", "0", "-p", "50000", "-n", "3" };
+    char *low[] = { "-i", "0x18f", "-p", "50000", "-n", "3" };
+
+    CHECK(run_ecu(big, 4) != 0, "id 0x800 does not fit 11 bits and was accepted");
+    CHECK_EQ(frames_written, 0);
+    CHECK(run_ecu(junk, 4) != 0, "an id with trailing text was accepted");
+    CHECK_EQ(frames_written, 0);
+    CHECK(run_ecu(empty, 4) != 0, "an empty id was accepted");
+    CHECK_EQ(frames_written, 0);
+    CHECK_EQ(run_ecu(top, 6), 0);
+    CHECK(frames_written > 0, "no frame sent with valid options");
+    CHECK_EQ(run_ecu(low, 6), 0);
+    CHECK(frames_written > 0, "no frame sent with valid options");
+    CHECK_EQ(run_ecu(zero, 6), 0);
+    CHECK(frames_written > 0, "no frame sent with valid options");
+}
+
 int main(void)
 {
     test_period();
+    test_id();
     return check_exit("test_ecu_sim");
 }

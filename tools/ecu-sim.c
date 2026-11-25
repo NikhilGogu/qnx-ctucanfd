@@ -200,7 +200,13 @@ int main(int argc, char *argv[])
         switch (c) {
         case 't': g_tx = optarg; break;
         case 'r': g_rx = optarg; break;
-        case 'i': g_id = (uint32_t)strtoul(optarg, NULL, 16); break;
+        case 'i':
+            if (!parse_num(optarg, 16, 0x7ff, &v)) {
+                fprintf(stderr, "ecu-sim: -i needs a standard id in hex, 0 to 7ff\n");
+                return 1;
+            }
+            g_id = (uint32_t)v;
+            break;
         case 'p':
             if (!parse_num(optarg, 0, UINT32_MAX, &v) || v == 0) {
                 fprintf(stderr, "ecu-sim: -p needs a period in microseconds from 1 to %u\n", UINT32_MAX);
