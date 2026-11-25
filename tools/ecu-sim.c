@@ -31,6 +31,7 @@
  * period that is already over when the thread wakes (an overrun, or time
  * spent reopening) is skipped and counted, never caught up.
  */
+#include <ctype.h>
 #include <devctl.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -172,16 +173,41 @@ static void on_term(int sig)
     g_stop = 1;
 }
 
+/* A whole-string number from 0 to max; false for empty text, a sign, trailing text or a value out of range. */
+static bool parse_num(const char *s, int base, unsigned long max, unsigned long *out)
+{
+    char *end;
+    unsigned long v;
+
+    if (!isalnum((unsigned char)s[0])) {
+        return false;
+    }
+    errno = 0;
+    v = strtoul(s, &end, base);
+    if (errno != 0 || *end != '\0' || v > max) {
+        return false;
+    }
+    *out = v;
+    return true;
+}
+
 int main(int argc, char *argv[])
 {
     int c;
+    unsigned long v;
 
     while ((c = getopt(argc, argv, "t:r:i:p:P:n:")) != -1) {
         switch (c) {
         case 't': g_tx = optarg; break;
         case 'r': g_rx = optarg; break;
         case 'i': g_id = (uint32_t)strtoul(optarg, NULL, 16); break;
-        case 'p': g_period_us = (unsigned)strtoul(optarg, NULL, 0); break;
+        case 'p':
+            if (!parse_num(optarg, 0, UINT32_MAX, &v) || v == 0) {
+                fprintf(stderr, "ecu-sim: -p needs a period in microseconds from 1 to %u\n", UINT32_MAX);
+                return 1;
+            }
+            g_period_us = (unsigned)v;
+            break;
         case 'P': g_prio = (unsigned)strtoul(optarg, NULL, 0); break;
         case 'n': g_count = strtoul(optarg, NULL, 0); break;
         default:
